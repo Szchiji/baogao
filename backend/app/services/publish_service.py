@@ -25,7 +25,7 @@ async def push_report_to_subscribers(
     text = render_template(template.publish_template_jinja2, context)
 
     result = await db.execute(
-        select(Subscription).where(Subscription.enabled == True)  # noqa: E712
+        select(Subscription).where(Subscription.enabled.is_(True))
     )
     subscriptions = result.scalars().all()
 

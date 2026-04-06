@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import jinja2
+from jinja2.sandbox import SandboxedEnvironment
 
 from app.models.report import Report
 from app.models.template import Template
@@ -107,6 +108,7 @@ def build_render_context(report: Report, template: Template, base_url: str) -> d
 
 
 def render_template(template_text: str, context: dict) -> str:
-    env = jinja2.Environment(undefined=jinja2.ChainableUndefined, autoescape=False)
+    # SandboxedEnvironment prevents access to internals (__class__, etc.)
+    env = SandboxedEnvironment(undefined=jinja2.ChainableUndefined, autoescape=False)
     tmpl = env.from_string(template_text)
     return tmpl.render(**context)

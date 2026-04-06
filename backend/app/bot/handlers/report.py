@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import uuid
-from typing import Any
-
 from aiogram import Router, F  # type: ignore
 from aiogram.filters import Command  # type: ignore
 from aiogram.fsm.context import FSMContext  # type: ignore
@@ -28,14 +25,12 @@ class ReportWizard(StatesGroup):
 async def _get_active_template() -> Template | None:
     async with AsyncSessionLocal() as db:
         result = await db.execute(
-            select(Template).where(Template.enabled == True).order_by(Template.created_at)  # noqa: E712
+            select(Template).where(Template.enabled.is_(True)).order_by(Template.created_at)
         )
         return result.scalars().first()
 
 
-async def _get_or_create_draft(
-    db: Any, user_id: int, template_key: str
-) -> ReportDraft:
+async def _get_or_create_draft(db, user_id: int, template_key: str) -> ReportDraft:
     result = await db.execute(
         select(ReportDraft).where(
             ReportDraft.telegram_user_id == user_id,
@@ -152,15 +147,12 @@ async def handle_answer(message: Message, state: FSMContext) -> None:
         answers[key] = raw_tags
 
     elif field_type == "media":
-        # Media is handled via waiting_media state or done callback
-        # For text "done", finalize media
         if message.text and message.text.lower() in ("done", "完成"):
             answers[key] = data.get("media_buffer", [])
         else:
             await message.answer("请发送媒体文件或点击「完成」按钮。")
             return
 
-    # Save draft
     async with AsyncSessionLocal() as db:
         draft = await _get_or_create_draft(db, message.from_user.id, template_key)
         draft.draft_json = answers
@@ -169,7 +161,7 @@ async def handle_answer(message: Message, state: FSMContext) -> None:
 
     next_step = current_step + 1
     if next_step >= len(fields):
-        await _finish_report(message, state, answers, tmpl)
+        await _finish_report(message, answers, tmpl, state)
         return
 
     await state.update_data(current_step=next_step, answers=answers)
@@ -215,7 +207,7 @@ async def handle_select_callback(callback: CallbackQuery, state: FSMContext) -> 
     await callback.answer()
 
     if next_step >= len(fields):
-        await _finish_report(callback.message, None, answers, tmpl, state)
+        await _finish_report(callback.message, answers, tmpl, state)
         return
 
     await state.update_data(current_step=next_step, answers=answers)
@@ -266,7 +258,7 @@ async def handle_media_done(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
     if next_step >= len(fields):
-        await _finish_report(callback.message, None, answers, tmpl, state)
+        await _finish_report(callback.message, answers, tmpl, state)
         return
 
     await state.update_data(current_step=next_step, answers=answers, media_buffer=[])
@@ -276,12 +268,10 @@ async def handle_media_done(callback: CallbackQuery, state: FSMContext) -> None:
 
 async def _finish_report(
     message: Message,
-    state: FSMContext | None,
     answers: dict,
     tmpl: Template,
-    fsm_state: FSMContext | None = None,
+    state: FSMContext | None = None,
 ) -> None:
-    active_state = fsm_state or state
     user_id = message.chat.id
     username = getattr(message.chat, "username", None)
 
@@ -307,7 +297,6 @@ async def _finish_report(
         )
         db.add(report)
 
-        # Remove draft
         from sqlalchemy import delete as sa_delete
         await db.execute(
             sa_delete(ReportDraft).where(
@@ -318,14 +307,13 @@ async def _finish_report(
         await db.commit()
         await db.refresh(report)
 
-    if active_state:
-        await active_state.clear()
+    if state:
+        await state.clear()
 
     await message.answer(
         f"✅ 报告已提交！\n报告编号：<b>#{report.report_number}</b>\n感谢您的反馈，管理员将尽快审核。"
     )
 
-    # Notify admins
     from app.bot.main import get_bot
     bot = get_bot()
     if bot:

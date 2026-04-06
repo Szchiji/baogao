@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import random
-import string
+import secrets
 import uuid
 from datetime import datetime, timezone, timedelta
 
@@ -13,7 +12,7 @@ from app.models.admin_otp import AdminLoginOtp
 
 
 def generate_otp() -> str:
-    return "".join(random.choices(string.digits, k=6))
+    return "".join(secrets.choice("0123456789") for _ in range(6))
 
 
 def generate_browser_token() -> str:
