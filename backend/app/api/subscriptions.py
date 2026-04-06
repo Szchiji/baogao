@@ -48,6 +48,7 @@ async def create_subscription(body: SubscriptionCreate, db: DbDep):
     db.add(sub)
     await db.flush()
     await db.refresh(sub)
+    await db.commit()
     return sub
 
 
@@ -58,3 +59,4 @@ async def delete_subscription(sub_id: uuid.UUID, db: DbDep):
     if sub is None:
         raise HTTPException(status_code=404, detail="Subscription not found")
     await db.delete(sub)
+    await db.commit()

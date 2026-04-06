@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from aiogram import Router, F  # type: ignore
 from aiogram.filters import Command  # type: ignore
 from aiogram.fsm.context import FSMContext  # type: ignore
@@ -8,6 +10,8 @@ from aiogram.types import Message, CallbackQuery  # type: ignore
 
 from app.bot.keyboards import build_select_keyboard, build_done_keyboard
 from app.database import AsyncSessionLocal
+
+logger = logging.getLogger(__name__)
 from app.models.template import Template
 from app.models.report import Report, ReportDraft
 from app.config import settings
@@ -331,4 +335,4 @@ async def _finish_report(
                     reply_markup=build_admin_review_keyboard(str(report.id)),
                 )
             except Exception:
-                pass
+                logger.exception("Failed to notify admin_id=%s about new report #%s", admin_id, report.report_number)

@@ -59,6 +59,10 @@
     <textarea class="form-control" id="publish_template" style="min-height:160px;">{{ template.publish_template_jinja2 or '' }}</textarea>
   </div>
   <button class="btn btn-secondary" style="font-size:0.85rem;" onclick="previewPublish()">👁 预览推送效果</button>
+  <div style="margin-top:0.5rem; display:flex; gap:0.5rem; align-items:center;">
+    <label style="font-size:0.85rem; white-space:nowrap;">报告 ID：</label>
+    <input type="text" id="preview-report-id" class="form-control" placeholder="粘贴一个已存在的报告 UUID" style="font-size:0.82rem; font-family:monospace;" />
+  </div>
   <div id="preview-output" style="margin-top:0.75rem;display:none;"></div>
 </div>
 
@@ -260,15 +264,20 @@ async function previewPublish() {
   const out = document.getElementById("preview-output");
   out.style.display = "block";
   out.textContent = "渲染中…";
-  // Use a dummy context for preview
   const tmplText = document.getElementById("publish_template").value;
+  const reportIdInput = document.getElementById("preview-report-id");
+  const reportId = reportIdInput ? reportIdInput.value.trim() : "";
+  if (!reportId) {
+    out.textContent = "请在下方输入一个有效的报告 ID 后再预览";
+    return;
+  }
   try {
     const resp = await fetch("/api/templates/preview", {
       method: "POST",
       headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({ report_id: "00000000-0000-0000-0000-000000000000", template_text: tmplText })
+      body: JSON.stringify({ report_id: reportId, template_text: tmplText })
     });
-    if (resp.status === 404) { out.textContent = "（需要存在的报告 ID 才能预览）"; return; }
+    if (resp.status === 404) { out.textContent = "（未找到该报告 ID，请输入已存在的报告 UUID）"; return; }
     const data = await resp.json();
     if (resp.ok) out.textContent = data.rendered_text;
     else out.textContent = "错误: " + JSON.stringify(data.detail || data);

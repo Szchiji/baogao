@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from aiogram import Router, F  # type: ignore
 from aiogram.types import CallbackQuery  # type: ignore
 from sqlalchemy import select, update
@@ -8,6 +10,8 @@ from app.database import AsyncSessionLocal
 from app.models.report import Report
 from app.models.template import Template
 from app.services.publish_service import push_report_to_subscribers
+
+logger = logging.getLogger(__name__)
 from app.bot.keyboards import build_admin_review_keyboard
 
 from datetime import datetime, timezone
@@ -120,7 +124,7 @@ async def handle_need_more_info(callback: CallbackQuery) -> None:
                         ),
                     )
                 except Exception:
-                    pass
+                    logger.exception("Failed to notify submitter user_id=%s for report #%s", report.submitted_by, report.report_number)
 
     await callback.answer("已标记需补充 ℹ️")
     await callback.message.edit_text(

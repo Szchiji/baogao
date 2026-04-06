@@ -62,6 +62,7 @@ async def create_template(body: TemplateCreate, db: DbDep):
     db.add(tmpl)
     await db.flush()
     await db.refresh(tmpl)
+    await db.commit()
     return tmpl
 
 
@@ -86,6 +87,7 @@ async def update_template(key: str, body: TemplateUpdate, db: DbDep):
 
     await db.flush()
     await db.refresh(tmpl)
+    await db.commit()
     return tmpl
 
 
@@ -96,6 +98,7 @@ async def delete_template(key: str, db: DbDep):
     if tmpl is None:
         raise HTTPException(status_code=404, detail="Template not found")
     await db.delete(tmpl)
+    await db.commit()
 
 
 @router.post("/preview", response_model=PreviewResponse)
