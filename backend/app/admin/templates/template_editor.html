@@ -1,0 +1,281 @@
+{% extends "base.html" %}
+
+{% block title %}编辑模板 - {{ template.template_key }}{% endblock %}
+
+{% block extra_head %}
+<style>
+  .field-card { border: 1px solid #e2e8f0; border-radius: 8px; padding: 1rem; margin-bottom: 0.75rem; background: #fafafa; }
+  .field-card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem; }
+  .field-type-section { display: none; }
+  .field-type-section.active { display: block; }
+  .options-list { margin-top: 0.5rem; }
+  .option-row { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.4rem; }
+  textarea.form-control { min-height: 120px; font-family: monospace; font-size: 0.85rem; }
+  #preview-output { white-space: pre-wrap; font-size: 0.88rem; background: #f7fafc; padding: 1rem; border-radius: 6px; border: 1px solid #e2e8f0; min-height: 80px; }
+  .drag-handle { cursor: grab; color: #a0aec0; font-size: 1.1rem; margin-right: 0.4rem; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="flex justify-between items-center" style="margin-bottom:1rem;">
+  <h1 style="font-size:1.2rem;font-weight:700;">✏️ 编辑模板：<code>{{ template.template_key }}</code></h1>
+  <div class="flex gap-2">
+    <button class="btn btn-secondary" onclick="history.back()">返回</button>
+    <button class="btn btn-primary" id="save-btn" onclick="saveTemplate()">💾 保存</button>
+  </div>
+</div>
+
+<div id="save-msg" style="display:none;margin-bottom:1rem;"></div>
+
+<div class="card">
+  <div class="card-title">基本信息</div>
+  <div class="form-group">
+    <label>模板名称</label>
+    <input class="form-control" id="template_name" value="{{ template.template_name }}" />
+  </div>
+  <div class="form-group">
+    <label>描述</label>
+    <input class="form-control" id="description" value="{{ template.description or '' }}" />
+  </div>
+  <div class="form-group">
+    <label>
+      <input type="checkbox" id="enabled" {% if template.enabled %}checked{% endif %} />
+      &nbsp;启用此模板
+    </label>
+  </div>
+</div>
+
+<div class="card">
+  <div class="flex justify-between items-center" style="margin-bottom:0.75rem;">
+    <div class="card-title" style="margin:0;">字段列表</div>
+    <button class="btn btn-success" style="font-size:0.85rem;" onclick="addField()">+ 添加字段</button>
+  </div>
+  <div id="fields-container"></div>
+</div>
+
+<div class="card">
+  <div class="card-title">推送模板（Jinja2）</div>
+  <div class="form-group">
+    <textarea class="form-control" id="publish_template" style="min-height:160px;">{{ template.publish_template_jinja2 or '' }}</textarea>
+  </div>
+  <button class="btn btn-secondary" style="font-size:0.85rem;" onclick="previewPublish()">👁 预览推送效果</button>
+  <div id="preview-output" style="margin-top:0.75rem;display:none;"></div>
+</div>
+
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+const TEMPLATE_KEY = "{{ template.template_key }}";
+let fields = {{ template.template_json.fields | tojson }};
+
+function renderFields() {
+  const container = document.getElementById("fields-container");
+  container.innerHTML = "";
+  fields.forEach((f, i) => {
+    container.appendChild(buildFieldCard(f, i));
+  });
+}
+
+function buildFieldCard(f, i) {
+  const div = document.createElement("div");
+  div.className = "field-card";
+  div.dataset.index = i;
+  div.innerHTML = `
+    <div class="field-card-header">
+      <span class="drag-handle">⠿</span>
+      <strong style="flex:1;">字段 ${i+1}: <code>${f.key || ''}</code></strong>
+      <div class="flex gap-2">
+        <button class="btn btn-secondary" style="padding:0.2rem 0.5rem;font-size:0.8rem;" onclick="moveField(${i},-1)" ${i===0?'disabled':''}>↑</button>
+        <button class="btn btn-secondary" style="padding:0.2rem 0.5rem;font-size:0.8rem;" onclick="moveField(${i},1)" ${i===fields.length-1?'disabled':''}>↓</button>
+        <button class="btn btn-danger" style="padding:0.2rem 0.5rem;font-size:0.8rem;" onclick="removeField(${i})">删除</button>
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.75rem;">
+      <div class="form-group">
+        <label>Key（英文小写）</label>
+        <input class="form-control" placeholder="e.g. summary" value="${f.key||''}" oninput="updateField(${i},'key',this.value)" />
+      </div>
+      <div class="form-group">
+        <label>标签（Label）</label>
+        <input class="form-control" placeholder="显示名称" value="${f.label||''}" oninput="updateField(${i},'label',this.value)" />
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0.75rem;">
+      <div class="form-group">
+        <label>字段类型</label>
+        <select class="form-control" onchange="updateFieldType(${i},this.value)">
+          ${['text','textarea','select','tags','media'].map(t=>`<option value="${t}" ${f.field_type===t?'selected':''}>${t}</option>`).join('')}
+        </select>
+      </div>
+      <div class="form-group">
+        <label>提示文字（可选）</label>
+        <input class="form-control" placeholder="help_text" value="${f.help_text||''}" oninput="updateField(${i},'help_text',this.value)" />
+      </div>
+      <div class="form-group" style="padding-top:1.4rem;">
+        <label>
+          <input type="checkbox" ${f.required?'checked':''} onchange="updateField(${i},'required',this.checked)" />
+          &nbsp;必填
+        </label>
+      </div>
+    </div>
+    <div id="section-select-${i}" class="field-type-section ${f.field_type==='select'?'active':''}">
+      <label class="form-group" style="display:block;">
+        <strong>选项列表</strong>
+        <div id="options-${i}" class="options-list">${buildOptionsHTML(f.options||[], i)}</div>
+        <button class="btn btn-secondary mt-2" style="font-size:0.8rem;" onclick="addOption(${i})">+ 添加选项</button>
+      </label>
+    </div>
+    <div id="section-media-${i}" class="field-type-section ${f.field_type==='media'?'active':''}">
+      <div class="form-group">
+        <label>允许的媒体类型</label>
+        <div>
+          <label><input type="checkbox" ${(f.allowed_media||[]).includes('photo')?'checked':''} onchange="toggleMedia(${i},'photo',this.checked)" /> 图片</label>
+          &nbsp;&nbsp;
+          <label><input type="checkbox" ${(f.allowed_media||[]).includes('document')?'checked':''} onchange="toggleMedia(${i},'document',this.checked)" /> 文件</label>
+        </div>
+      </div>
+    </div>
+    <div id="section-tags-${i}" class="field-type-section ${f.field_type==='tags'?'active':''}">
+      <div class="form-group">
+        <label>最多标签数</label>
+        <input class="form-control" type="number" min="1" max="50" value="${f.max_items||''}" placeholder="留空不限制" oninput="updateFieldNum(${i},'max_items',this.value)" style="max-width:120px;" />
+      </div>
+    </div>
+  `;
+  return div;
+}
+
+function buildOptionsHTML(options, i) {
+  return options.map((o,j) => `
+    <div class="option-row" id="opt-${i}-${j}">
+      <input class="form-control" placeholder="value" value="${o.value||''}" oninput="updateOption(${i},${j},'value',this.value)" style="width:140px;" />
+      <input class="form-control" placeholder="label" value="${o.label||''}" oninput="updateOption(${i},${j},'label',this.value)" style="width:140px;" />
+      <button class="btn btn-danger" style="padding:0.2rem 0.5rem;font-size:0.8rem;" onclick="removeOption(${i},${j})">×</button>
+    </div>
+  `).join('');
+}
+
+function updateField(i, key, value) {
+  fields[i][key] = value;
+}
+
+function updateFieldNum(i, key, value) {
+  fields[i][key] = value ? parseInt(value) : undefined;
+  if (fields[i][key] === undefined) delete fields[i][key];
+}
+
+function updateFieldType(i, value) {
+  fields[i].field_type = value;
+  ['select','media','tags'].forEach(t => {
+    const el = document.getElementById(`section-${t}-${i}`);
+    if (el) el.className = `field-type-section ${value===t?'active':''}`;
+  });
+}
+
+function toggleMedia(i, type, checked) {
+  const allowed = fields[i].allowed_media || [];
+  if (checked && !allowed.includes(type)) allowed.push(type);
+  if (!checked) { const idx = allowed.indexOf(type); if (idx>=0) allowed.splice(idx,1); }
+  fields[i].allowed_media = allowed.length ? allowed : undefined;
+  if (!fields[i].allowed_media) delete fields[i].allowed_media;
+}
+
+function addOption(i) {
+  if (!fields[i].options) fields[i].options = [];
+  fields[i].options.push({value:'',label:''});
+  document.getElementById(`options-${i}`).innerHTML = buildOptionsHTML(fields[i].options, i);
+}
+
+function removeOption(i, j) {
+  fields[i].options.splice(j,1);
+  document.getElementById(`options-${i}`).innerHTML = buildOptionsHTML(fields[i].options, i);
+}
+
+function updateOption(i, j, key, value) {
+  fields[i].options[j][key] = value;
+}
+
+function moveField(i, dir) {
+  const j = i + dir;
+  if (j < 0 || j >= fields.length) return;
+  [fields[i], fields[j]] = [fields[j], fields[i]];
+  renderFields();
+}
+
+function removeField(i) {
+  fields.splice(i, 1);
+  renderFields();
+}
+
+function addField() {
+  fields.push({ key: '', label: '', field_type: 'text', required: false });
+  renderFields();
+}
+
+function collectTemplateJSON() {
+  return {
+    schema_version: 1,
+    template_key: TEMPLATE_KEY,
+    template_name: document.getElementById("template_name").value.trim(),
+    description: document.getElementById("description").value.trim(),
+    enabled: document.getElementById("enabled").checked,
+    fields: fields.map(f => {
+      const clean = Object.fromEntries(Object.entries(f).filter(([,v]) => v !== undefined && v !== ''));
+      return clean;
+    })
+  };
+}
+
+async function saveTemplate() {
+  const btn = document.getElementById("save-btn");
+  btn.disabled = true;
+  btn.textContent = "保存中…";
+  const payload = {
+    template_json: collectTemplateJSON(),
+    publish_template_jinja2: document.getElementById("publish_template").value
+  };
+  const resp = await fetch(`/admin/templates/${TEMPLATE_KEY}/save`, {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(payload)
+  });
+  const data = await resp.json();
+  const msgEl = document.getElementById("save-msg");
+  msgEl.style.display = "block";
+  if (resp.ok) {
+    msgEl.className = "alert alert-success";
+    msgEl.textContent = "✅ 保存成功";
+  } else {
+    msgEl.className = "alert alert-error";
+    const errs = data.errors ? data.errors.map(e => `${e.json_path}: ${e.reason}`).join('\n') : JSON.stringify(data);
+    msgEl.textContent = "❌ 验证失败：\n" + errs;
+  }
+  btn.disabled = false;
+  btn.textContent = "💾 保存";
+  setTimeout(() => { msgEl.style.display = "none"; }, 5000);
+}
+
+async function previewPublish() {
+  const out = document.getElementById("preview-output");
+  out.style.display = "block";
+  out.textContent = "渲染中…";
+  // Use a dummy context for preview
+  const tmplText = document.getElementById("publish_template").value;
+  try {
+    const resp = await fetch("/api/templates/preview", {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({ report_id: "00000000-0000-0000-0000-000000000000", template_text: tmplText })
+    });
+    if (resp.status === 404) { out.textContent = "（需要存在的报告 ID 才能预览）"; return; }
+    const data = await resp.json();
+    if (resp.ok) out.textContent = data.rendered_text;
+    else out.textContent = "错误: " + JSON.stringify(data.detail || data);
+  } catch(e) { out.textContent = "请求失败: " + e; }
+}
+
+// Init
+renderFields();
+</script>
+{% endblock %}

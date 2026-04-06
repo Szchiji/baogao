@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+
+{% block title %}仪表盘{% endblock %}
+
+{% block content %}
+{% if view == "templates" %}
+  <div class="flex justify-between items-center" style="margin-bottom:1rem;">
+    <h1 style="font-size:1.3rem;font-weight:700;">模板管理</h1>
+  </div>
+  <div class="card">
+    {% if templates %}
+    <table class="table">
+      <thead>
+        <tr>
+          <th>模板 Key</th>
+          <th>名称</th>
+          <th>状态</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for t in templates %}
+        <tr>
+          <td><code>{{ t.template_key }}</code></td>
+          <td>{{ t.template_name }}</td>
+          <td>
+            {% if t.enabled %}
+              <span class="badge badge-approved">启用</span>
+            {% else %}
+              <span class="badge badge-rejected">禁用</span>
+            {% endif %}
+          </td>
+          <td>
+            <a href="/admin/templates/{{ t.template_key }}/edit" class="btn btn-primary" style="padding:0.3rem 0.7rem;font-size:0.82rem;">编辑</a>
+            <a href="/admin/templates/{{ t.template_key }}/preview" class="btn btn-secondary" style="padding:0.3rem 0.7rem;font-size:0.82rem;">预览</a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="text-gray text-sm">暂无模板。</p>
+    {% endif %}
+  </div>
+{% else %}
+  <h1 style="font-size:1.3rem;font-weight:700;margin-bottom:1rem;">仪表盘</h1>
+
+  <div class="card">
+    <div class="card-title">最近报告</div>
+    {% if recent_reports %}
+    <table class="table">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>状态</th>
+          <th>提交人</th>
+          <th>提交时间</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in recent_reports %}
+        <tr>
+          <td>{{ r.report_number }}</td>
+          <td><span class="badge badge-{{ r.status }}">{{ r.status }}</span></td>
+          <td>{{ r.submitted_username or r.submitted_by or '—' }}</td>
+          <td style="font-size:0.82rem;color:#718096;">{{ r.created_at.strftime('%Y-%m-%d %H:%M') if r.created_at else '—' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="text-gray text-sm">暂无报告。</p>
+    {% endif %}
+  </div>
+{% endif %}
+{% endblock %}
