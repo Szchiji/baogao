@@ -148,13 +148,19 @@ def init_db() -> None:
               status TEXT NOT NULL DEFAULT 'pending',
               review_feedback TEXT,
               created_at TEXT NOT NULL,
-              reviewed_at TEXT
+              reviewed_at TEXT,
+              channel_message_link TEXT
             )
             """
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status, id DESC)"
         )
+        # Migration: add channel_message_link column if it does not exist yet
+        try:
+            conn.execute("ALTER TABLE reports ADD COLUMN channel_message_link TEXT")
+        except Exception:
+            pass  # column already exists
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
@@ -524,7 +530,7 @@ async def query_reports(text: str) -> str:
         with db_connection() as conn:
             rows = conn.execute(
                 """
-                SELECT id, username, tag, data_json, created_at
+                SELECT id, username, tag, data_json, created_at, channel_message_link
                 FROM reports
                 WHERE status = 'approved' AND username = ?
                 ORDER BY id DESC LIMIT 10
@@ -535,7 +541,7 @@ async def query_reports(text: str) -> str:
         with db_connection() as conn:
             rows = conn.execute(
                 """
-                SELECT id, username, tag, data_json, created_at
+                SELECT id, username, tag, data_json, created_at, channel_message_link
                 FROM reports
                 WHERE status = 'approved' AND tag = ?
                 ORDER BY id DESC LIMIT 10
@@ -549,7 +555,13 @@ async def query_reports(text: str) -> str:
     link_base = setting_get("report_link_base", "").strip()
     lines = ["查询结果："]
     for row in rows:
-        link = f"{link_base.rstrip('/')}/reports/{row['id']}" if link_base else f"报告ID: {row['id']}"
+        channel_link = row["channel_message_link"] if row["channel_message_link"] else ""
+        if channel_link:
+            link = channel_link
+        elif link_base:
+            link = f"{link_base.rstrip('/')}/reports/{row['id']}"
+        else:
+            link = f"报告ID: {row['id']}"
         lines.append(
             f"- #{row['id']} @{row['username'] or 'unknown'} {row['tag'] or ''}\n  {link}"
         )
@@ -604,8 +616,11 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "UPDATE reports SET status='rejected', review_feedback=?, reviewed_at=? WHERE id = ?",
                 (reason, utc_now_iso(), pending_reject_id),
             )
-        tpl = setting_get("review_rejected_template", DEFAULT_SETTINGS["review_rejected_template"])
-        feedback = tpl.format(id=pending_reject_id, reason=reason)
+        tpl = (
+            setting_get("review_rejected_template", "").strip()
+            or DEFAULT_SETTINGS["review_rejected_template"]
+        )
+        feedback = safe_format(tpl, id=pending_reject_id, reason=reason)
         await context.bot.send_message(chat_id=report["user_id"], text=feedback)
         await update.message.reply_text(f"报告 #{pending_reject_id} 已驳回。")
         return
@@ -730,17 +745,42 @@ async def submit_report(context: ContextTypes.DEFAULT_TYPE, update: Update) -> N
                 )
 
 
-def _build_approval_feedback(report_id: int) -> str:
-    approved_tpl = setting_get("review_approved_template", DEFAULT_SETTINGS["review_approved_template"])
-    link_base = setting_get("report_link_base", "").strip()
-    link = f"{link_base.rstrip('/')}/reports/{report_id}" if link_base else ""
+def _build_approval_feedback(report_id: int, channel_link: str = "") -> str:
+    approved_tpl = (
+        setting_get("review_approved_template", "").strip()
+        or DEFAULT_SETTINGS["review_approved_template"]
+    )
+    # Prefer the real Telegram channel message link; fall back to report_link_base web URL
+    if channel_link:
+        link = channel_link
+    else:
+        link_base = setting_get("report_link_base", "").strip()
+        link = f"{link_base.rstrip('/')}/reports/{report_id}" if link_base else ""
     return safe_format(approved_tpl, id=report_id, link=link)
 
 
-async def _push_report_to_channel(bot: Bot, report_id: int, report: sqlite3.Row) -> None:
+def _build_channel_message_link(channel: str, message_id: int) -> str:
+    """Return a t.me deep-link to a specific message posted in *channel*."""
+    channel = channel.strip()
+    if not channel or not message_id:
+        return ""
+    if channel.startswith("@"):
+        return f"https://t.me/{channel[1:]}/{message_id}"
+    # Private/supergroup numeric IDs (e.g. -1001234567890 → t.me/c/1234567890/...)
+    raw = channel.lstrip("-")
+    if raw.isdigit():
+        if raw.startswith("100"):
+            raw = raw[3:]
+        return f"https://t.me/c/{raw}/{message_id}"
+    # Plain username without leading @
+    return f"https://t.me/{channel}/{message_id}"
+
+
+async def _push_report_to_channel(bot: Bot, report_id: int, report: sqlite3.Row) -> str:
+    """Push *report* to the configured channel.  Returns the channel message link (or '')."""
     push_channel = setting_get("push_channel", "").strip()
     if not push_channel:
-        return
+        return ""
     data_values = parse_json(report["data_json"], {})
     link_base = setting_get("report_link_base", "").strip()
     link = f"{link_base.rstrip('/')}/reports/{report_id}" if link_base else ""
@@ -764,9 +804,18 @@ async def _push_report_to_channel(bot: Bot, report_id: int, report: sqlite3.Row)
         link=link,
     )
     try:
-        await bot.send_message(chat_id=push_channel, text=push_text)
+        msg = await bot.send_message(chat_id=push_channel, text=push_text)
+        channel_link = _build_channel_message_link(push_channel, msg.message_id)
+        if channel_link:
+            with db_connection() as conn:
+                conn.execute(
+                    "UPDATE reports SET channel_message_link=? WHERE id=?",
+                    (channel_link, report_id),
+                )
+        return channel_link
     except Exception:
         logger.warning("failed to push report %s to channel", report_id, exc_info=True)
+        return ""
 
 
 async def pending_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -810,10 +859,9 @@ async def approve_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
     await update.message.reply_text(f"报告 #{report_id} 已通过。")
 
-    feedback = _build_approval_feedback(report_id)
+    channel_link = await _push_report_to_channel(context.bot, report_id, report)
+    feedback = _build_approval_feedback(report_id, channel_link=channel_link)
     await context.bot.send_message(chat_id=report["user_id"], text=feedback)
-
-    await _push_report_to_channel(context.bot, report_id, report)
 
 
 async def reject_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -838,8 +886,11 @@ async def reject_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             "UPDATE reports SET status='rejected', review_feedback=?, reviewed_at=? WHERE id = ?",
             (reason, utc_now_iso(), report_id),
         )
-    tpl = setting_get("review_rejected_template", DEFAULT_SETTINGS["review_rejected_template"])
-    feedback = tpl.format(id=report_id, reason=reason)
+    tpl = (
+        setting_get("review_rejected_template", "").strip()
+        or DEFAULT_SETTINGS["review_rejected_template"]
+    )
+    feedback = safe_format(tpl, id=report_id, reason=reason)
     await context.bot.send_message(chat_id=report["user_id"], text=feedback)
     await update.message.reply_text(f"报告 #{report_id} 已驳回。")
 
@@ -935,9 +986,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         except Exception:
             pass
         await query.message.reply_text(f"✅ 报告 #{report_id} 已通过审核。")
-        feedback = _build_approval_feedback(report_id)
+        channel_link = await _push_report_to_channel(context.bot, report_id, report)
+        feedback = _build_approval_feedback(report_id, channel_link=channel_link)
         await context.bot.send_message(chat_id=report["user_id"], text=feedback)
-        await _push_report_to_channel(context.bot, report_id, report)
         return
 
     if data.startswith("reject:"):
@@ -1240,7 +1291,7 @@ _ADMIN_JS = """
 """
 
 
-def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] | None = None, saved: bool = False, user_count: int = 0) -> str:
+def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] | None = None, saved: bool = False, user_count: int = 0, db_path: str = "") -> str:
     def e(key: str) -> str:
         return html.escape(settings_map.get(key, ""))
 
@@ -1351,7 +1402,12 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
   <div class="field">
     <label>报告链接基地址</label>
     <input type="text" name="report_link_base" value="{e('report_link_base')}" placeholder="https://yourdomain.com">
-    <div class="hint">报告查询结果显示链接的前缀，链接格式为：域名/reports/ID（留空则仅显示报告 ID）</div>
+    <div class="hint">报告查询结果显示链接的前缀，链接格式为：域名/reports/ID（留空则仅显示报告 ID）；当推送到频道时会自动使用频道消息链接，无需另行配置</div>
+  </div>
+  <div class="field">
+    <label>数据库路径</label>
+    <input type="text" value="{html.escape(db_path)}" readonly style="background:#f5f5f5;color:#888;">
+    <div class="hint">⚠️ 当前数据库文件位置。部署在 Railway 等平台时，若未挂载持久化存储卷，重新部署后数据将丢失。请在平台设置中挂载 Volume 并将 <code>DB_PATH</code> 环境变量指向该卷内的路径（如 <code>/data/baogao.db</code>）。</div>
   </div>
 </div>
 
@@ -1709,7 +1765,7 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
         settings_map = {r["key"]: r["value"] for r in rows}
         pending_list = [dict(r) for r in pending_rows]
         user_count = user_count_row["cnt"] if user_count_row else 0
-        response = HTMLResponse(build_admin_html(settings_map, pending_list, saved=saved, user_count=user_count))
+        response = HTMLResponse(build_admin_html(settings_map, pending_list, saved=saved, user_count=user_count, db_path=str(DB_PATH.resolve())))
         if should_set_cookie:
             response.set_cookie(
                 key="admin_token",
@@ -1797,15 +1853,16 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
                 "UPDATE reports SET status='approved', reviewed_at=? WHERE id = ?",
                 (utc_now_iso(), report_id),
             )
-        feedback = _build_approval_feedback(report_id)
+        try:
+            channel_link = await _push_report_to_channel(web.state.tg_application.bot, report_id, report)
+        except Exception:
+            logger.warning("failed to push report %s to channel", report_id, exc_info=True)
+            channel_link = ""
+        feedback = _build_approval_feedback(report_id, channel_link=channel_link)
         try:
             await web.state.tg_application.bot.send_message(chat_id=report["user_id"], text=feedback)
         except Exception:
             logger.warning("failed to notify user %s of approval", report["user_id"], exc_info=True)
-        try:
-            await _push_report_to_channel(web.state.tg_application.bot, report_id, report)
-        except Exception:
-            logger.warning("failed to push report %s to channel", report_id, exc_info=True)
         safe_id = html.escape(str(report_id))
         return HTMLResponse(f"<html><body>报告 #{safe_id} 已通过。<a href='/admin'>返回</a></body></html>")
 
@@ -1823,8 +1880,11 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
                 "UPDATE reports SET status='rejected', review_feedback=?, reviewed_at=? WHERE id = ?",
                 (reason.strip() or "请联系管理员", utc_now_iso(), report_id),
             )
-        tpl = setting_get("review_rejected_template", DEFAULT_SETTINGS["review_rejected_template"])
-        feedback = tpl.format(id=report_id, reason=reason.strip() or "请联系管理员")
+        tpl = (
+            setting_get("review_rejected_template", "").strip()
+            or DEFAULT_SETTINGS["review_rejected_template"]
+        )
+        feedback = safe_format(tpl, id=report_id, reason=reason.strip() or "请联系管理员")
         try:
             await web.state.tg_application.bot.send_message(chat_id=report["user_id"], text=feedback)
         except Exception:
