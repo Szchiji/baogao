@@ -426,11 +426,13 @@ async def query_reports(text: str) -> str:
 
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    has_message = bool(update.message)
+    has_text = bool(update.message and update.message.text)
     if not update.message or not update.message.text:
         logger.info(
             "on_text skipped: has_message=%s has_text=%s update_id=%s",
-            bool(update.message),
-            bool(update.message and update.message.text),
+            has_message,
+            has_text,
             update.update_id,
         )
         return
