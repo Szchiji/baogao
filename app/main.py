@@ -103,7 +103,7 @@ def load_config() -> AppConfig:
         raise RuntimeError("BOT_TOKEN is required")
     return AppConfig(
         token=token,
-        mode=os.getenv("BOT_MODE", "polling").strip().lower(),
+        mode=os.getenv("BOT_MODE", "webhook").strip().lower(),
         webhook_url=os.getenv("WEBHOOK_URL", "").strip(),
         webhook_path=os.getenv("WEBHOOK_PATH", "/webhook").strip(),
         host=os.getenv("HOST", "0.0.0.0").strip(),
@@ -250,13 +250,16 @@ def _is_admin_entry_button(text: str, url: str) -> bool:
 def start_inline_buttons(user_id: int | None = None) -> InlineKeyboardMarkup | None:
     raw_buttons = parse_json(setting_get("start_buttons_json"), [])
     is_admin = user_id is not None and is_user_admin(user_id)
+    admin_panel_url = os.getenv("ADMIN_PANEL_URL", "").strip()
     buttons: list[list[InlineKeyboardButton]] = []
     for item in raw_buttons:
         if isinstance(item, dict) and item.get("text") and item.get("url"):
             text = str(item["text"])
             url = str(item["url"])
-            if not is_admin and _is_admin_entry_button(text, url):
-                continue
+            if _is_admin_entry_button(text, url):
+                if not is_admin:
+                    continue
+                url = f"{admin_panel_url.rstrip('/')}/admin" if admin_panel_url else url
             buttons.append([InlineKeyboardButton(text, url=url)])
     return InlineKeyboardMarkup(buttons) if buttons else None
 
@@ -364,7 +367,7 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not base_url:
         await update.message.reply_text("未配置 ADMIN_PANEL_URL。")
         return
-    url = base_url
+    url = f"{base_url.rstrip('/')}/admin"
     button = InlineKeyboardMarkup(
         [[InlineKeyboardButton("打开管理后台", web_app=WebAppInfo(url=url))]]
     )
