@@ -13,7 +13,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import uvicorn
-from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from telegram import (
     Bot,
@@ -66,6 +66,7 @@ DEFAULT_SETTINGS: dict[str, str] = {
     ),
     "review_approved_template": "✅ 报告 #{id} 审核通过。",
     "review_rejected_template": "❌ 报告 #{id} 审核未通过：{reason}",
+    "push_template": "📢 审核通过报告 #{id}\n@{username}\n{detail}",
     "report_template_json": json.dumps(
         {
             "name": "默认模板",
@@ -154,6 +155,16 @@ def init_db() -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status, id DESC)"
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+              user_id INTEGER PRIMARY KEY,
+              username TEXT,
+              first_seen TEXT NOT NULL,
+              last_seen TEXT NOT NULL
+            )
+            """
+        )
         for key, value in DEFAULT_SETTINGS.items():
             conn.execute(
                 "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (key, value)
@@ -184,6 +195,31 @@ def parse_json(raw: str, fallback: Any) -> Any:
         return fallback
 
 
+class _SafeDict(dict):
+    def __missing__(self, key: str) -> str:
+        return "{" + key + "}"
+
+
+def safe_format(template: str, **kwargs: Any) -> str:
+    """Format template with kwargs; unknown placeholders are left as-is."""
+    try:
+        return template.format_map(_SafeDict(**{k: str(v) for k, v in kwargs.items()}))
+    except (ValueError, KeyError):
+        return template
+
+
+def upsert_user(user_id: int, username: str | None) -> None:
+    now = utc_now_iso()
+    with db_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO users (user_id, username, first_seen, last_seen) VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET username=excluded.username, last_seen=excluded.last_seen
+            """,
+            (user_id, username or "", now, now),
+        )
+
+
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -196,13 +232,14 @@ def keyboard_config() -> list[dict[str, str]]:
             normalized.append({"text": item, "action": "text"})
             continue
         if isinstance(item, dict) and item.get("text"):
-            normalized.append(
-                {
-                    "text": str(item.get("text")),
-                    "action": str(item.get("action", "text")),
-                    "value": str(item.get("value", "")),
-                }
-            )
+            entry: dict[str, str] = {
+                "text": str(item.get("text")),
+                "action": str(item.get("action", "text")),
+                "value": str(item.get("value", "")),
+            }
+            if item.get("row") is not None and str(item.get("row")).strip():
+                entry["row"] = str(item.get("row")).strip()
+            normalized.append(entry)
     return normalized
 
 
@@ -216,8 +253,38 @@ def report_template() -> dict[str, Any]:
     valid_fields = []
     for field in fields:
         if isinstance(field, dict) and field.get("key") and field.get("label"):
-            valid_fields.append({"key": str(field["key"]), "label": str(field["label"])})
+            valid_fields.append({
+                "key": str(field["key"]),
+                "label": str(field["label"]),
+                "hint": str(field.get("hint", "")),
+                "required": bool(field.get("required", True)),
+                "type": str(field.get("type", "text")),
+            })
     return {"name": str(data.get("name", "模板")), "fields": valid_fields}
+
+
+def _make_field_prompt(field: dict[str, Any], sequential: bool = True) -> tuple[str, "InlineKeyboardMarkup | None"]:
+    """Return (prompt_text, optional_skip_markup) for prompting a field value."""
+    label = field["label"]
+    hint = field.get("hint", "")
+    field_type = field.get("type", "text")
+    required = field.get("required", True)
+
+    if field_type == "photo":
+        prompt = f"请发送「{label}」的图片"
+    else:
+        prompt = f"请输入「{label}」"
+
+    if hint:
+        prompt += f"\n\n💡 {hint}"
+
+    markup = None
+    if not required and sequential:
+        prompt += "\n\n（此项为可选，可跳过不填写）"
+        markup = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⏭ 跳过此项", callback_data=f"skip_field:{field['key']}")]]
+        )
+    return prompt, markup
 
 
 async def is_subscribed(bot: Bot, user_id: int) -> bool:
@@ -233,9 +300,33 @@ async def is_subscribed(bot: Bot, user_id: int) -> bool:
 
 
 def start_keyboard() -> ReplyKeyboardMarkup:
-    rows = [[KeyboardButton(item["text"])] for item in keyboard_config()]
-    if not rows:
-        rows = [[KeyboardButton("写报告")], [KeyboardButton("查阅报告")]]
+    items = keyboard_config()
+    if not items:
+        return ReplyKeyboardMarkup(
+            [[KeyboardButton("写报告")], [KeyboardButton("查阅报告")]], resize_keyboard=True
+        )
+    rows: list[list[KeyboardButton]] = []
+    current_row_key: str | None = None
+    current_row: list[KeyboardButton] = []
+    for item in items:
+        row_val = item.get("row", "")
+        btn = KeyboardButton(item["text"])
+        if row_val:
+            if row_val == current_row_key:
+                current_row.append(btn)
+            else:
+                if current_row:
+                    rows.append(current_row)
+                current_row = [btn]
+                current_row_key = row_val
+        else:
+            if current_row:
+                rows.append(current_row)
+                current_row = []
+                current_row_key = None
+            rows.append([btn])
+    if current_row:
+        rows.append(current_row)
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 
@@ -272,8 +363,12 @@ def render_report_preview(values: dict[str, str], template: dict[str, Any]) -> s
     for field in template["fields"]:
         key = field["key"]
         label = html.escape(str(field["label"]))
+        field_type = field.get("type", "text")
         raw_value = values.get(key, "")
-        value = html.escape(raw_value) if raw_value else "<i>（未填写）</i>"
+        if raw_value:
+            value = "📷（已上传图片）" if field_type == "photo" else html.escape(raw_value)
+        else:
+            value = "<i>（未填写）</i>"
         lines.append(f"<b>{label}</b>：{value}")
     return "\n".join(lines)
 
@@ -282,8 +377,15 @@ def report_fill_keyboard(values: dict[str, str], template: dict[str, Any]) -> In
     buttons = []
     for field in template["fields"]:
         key = field["key"]
-        done = "✅ " if values.get(key) else ""
-        buttons.append([InlineKeyboardButton(f"{done}填写 {field['label']}", callback_data=f"fill:{key}")])
+        field_type = field.get("type", "text")
+        has_value = bool(values.get(key, ""))
+        done = "✅ " if has_value else ""
+        label = field["label"]
+        if field_type == "photo":
+            label += " 📷"
+        if not field.get("required", True):
+            label += "（可选）"
+        buttons.append([InlineKeyboardButton(f"{done}填写 {label}", callback_data=f"fill:{key}")])
     buttons.append([InlineKeyboardButton("提交审核", callback_data="submit_report")])
     return InlineKeyboardMarkup(buttons)
 
@@ -368,6 +470,7 @@ def build_channel_link(channel: str) -> str | None:
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
+    upsert_user(user_id, update.effective_user.username)
     channel = setting_get("force_sub_channel", "").strip()
     if channel and not await is_subscribed(context.bot, user_id):
         rows = [[InlineKeyboardButton("我已订阅，重新检测", callback_data="retry_sub")]]
@@ -408,8 +511,10 @@ async def write_report_flow(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     first_field = fields[0]
     draft["awaiting"] = first_field["key"]
     draft["sequential"] = True
+    prompt, markup = _make_field_prompt(first_field, sequential=True)
     await update.message.reply_text(
-        f"📝 开始填写《{draft['template']['name']}》\n\n请输入{first_field['label']}："
+        f"📝 开始填写《{draft['template']['name']}》\n\n{prompt}",
+        reply_markup=markup,
     )
 
 
@@ -464,9 +569,17 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     text = message_text.strip()
 
+    user = update.effective_user
+    upsert_user(user.id, user.username)
+
     channel = setting_get("force_sub_channel", "").strip()
     if channel and not await is_subscribed(context.bot, update.effective_user.id):
-        await update.message.reply_text("请先完成频道订阅后再使用。")
+        rows = [[InlineKeyboardButton("我已订阅，重新检测", callback_data="retry_sub")]]
+        channel_link = build_channel_link(channel)
+        if channel_link:
+            rows.insert(0, [InlineKeyboardButton("先去订阅", url=channel_link)])
+        markup = InlineKeyboardMarkup(rows)
+        await update.message.reply_text("请先订阅频道后再使用机器人。", reply_markup=markup)
         return
 
     # Admin reject-reason flow: only when admin is NOT mid-draft to avoid ambiguity
@@ -500,6 +613,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     draft = context.user_data.get("report_draft")
     if draft and draft.get("awaiting"):
         key = draft["awaiting"]
+        field_def = next((f for f in draft["template"]["fields"] if f["key"] == key), {})
+        if field_def.get("type", "text") == "photo":
+            await update.message.reply_text(
+                f"请发送图片（不是文字），作为「{field_def['label']}」字段。"
+            )
+            return
         draft["values"][key] = text
         draft["awaiting"] = ""
         sequential = draft.pop("sequential", False)
@@ -512,7 +631,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 next_field = fields[next_idx]
                 draft["awaiting"] = next_field["key"]
                 draft["sequential"] = True
-                await update.message.reply_text(f"请输入{next_field['label']}：")
+                prompt, markup = _make_field_prompt(next_field, sequential=True)
+                await update.message.reply_text(prompt, reply_markup=markup)
                 return
 
         await update.message.reply_text(
@@ -556,7 +676,7 @@ async def submit_report(context: ContextTypes.DEFAULT_TYPE, update: Update) -> N
     if not draft:
         await update.effective_chat.send_message("请先点击“写报告”。")
         return
-    required_fields = [f["key"] for f in draft["template"]["fields"]]
+    required_fields = [f["key"] for f in draft["template"]["fields"] if f.get("required", True)]
     missing = [k for k in required_fields if not draft["values"].get(k, "").strip()]
     if missing:
         await update.effective_chat.send_message("仍有未填写项，请继续完善。")
@@ -610,6 +730,45 @@ async def submit_report(context: ContextTypes.DEFAULT_TYPE, update: Update) -> N
                 )
 
 
+def _build_approval_feedback(report_id: int) -> str:
+    approved_tpl = setting_get("review_approved_template", DEFAULT_SETTINGS["review_approved_template"])
+    link_base = setting_get("report_link_base", "").strip()
+    link = f"{link_base.rstrip('/')}/reports/{report_id}" if link_base else ""
+    return safe_format(approved_tpl, id=report_id, link=link)
+
+
+async def _push_report_to_channel(bot: Bot, report_id: int, report: sqlite3.Row) -> None:
+    push_channel = setting_get("push_channel", "").strip()
+    if not push_channel:
+        return
+    data_values = parse_json(report["data_json"], {})
+    link_base = setting_get("report_link_base", "").strip()
+    link = f"{link_base.rstrip('/')}/reports/{report_id}" if link_base else ""
+    # Build detail text: only text fields (not photo fields), using labels
+    tpl_fields = report_template()["fields"]
+    field_labels = {f["key"]: f["label"] for f in tpl_fields}
+    field_types = {f["key"]: f.get("type", "text") for f in tpl_fields}
+    detail_parts = []
+    for k, v in data_values.items():
+        if field_types.get(k, "text") == "photo":
+            continue
+        label = field_labels.get(k, k)
+        detail_parts.append(f"{label}: {v}")
+    detail = "\n".join(detail_parts)
+    push_tpl = setting_get("push_template", DEFAULT_SETTINGS["push_template"])
+    push_text = safe_format(
+        push_tpl,
+        id=report_id,
+        username=report["username"] or "unknown",
+        detail=detail,
+        link=link,
+    )
+    try:
+        await bot.send_message(chat_id=push_channel, text=push_text)
+    except Exception:
+        logger.warning("failed to push report %s to channel", report_id, exc_info=True)
+
+
 async def pending_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_user_admin(update.effective_user.id):
         await update.message.reply_text("无权限。")
@@ -651,18 +810,10 @@ async def approve_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
     await update.message.reply_text(f"报告 #{report_id} 已通过。")
 
-    approved_tpl = setting_get("review_approved_template", DEFAULT_SETTINGS["review_approved_template"])
-    feedback = approved_tpl.format(id=report_id)
+    feedback = _build_approval_feedback(report_id)
     await context.bot.send_message(chat_id=report["user_id"], text=feedback)
 
-    push_channel = setting_get("push_channel", "").strip()
-    if push_channel:
-        data = parse_json(report["data_json"], {})
-        detail = "\n".join([f"{k}: {v}" for k, v in data.items()])
-        await context.bot.send_message(
-            chat_id=push_channel,
-            text=f"📢 审核通过报告 #{report_id}\n@{report['username'] or 'unknown'}\n{detail}",
-        )
+    await _push_report_to_channel(context.bot, report_id, report)
 
 
 async def reject_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -724,7 +875,32 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         draft["awaiting"] = key
         draft["sequential"] = False
-        await query.message.reply_text(f"请输入{field['label']}：")
+        prompt, _ = _make_field_prompt(field, sequential=False)
+        await query.message.reply_text(prompt)
+        return
+
+    if data.startswith("skip_field:"):
+        await query.answer()
+        key = data.split(":", 1)[1]
+        if not draft or draft.get("awaiting") != key:
+            return
+        draft["values"][key] = ""
+        draft["awaiting"] = ""
+        fields = draft["template"]["fields"]
+        current_idx = next((i for i, f in enumerate(fields) if f["key"] == key), -1)
+        next_idx = current_idx + 1
+        if next_idx < len(fields):
+            next_field = fields[next_idx]
+            draft["awaiting"] = next_field["key"]
+            draft["sequential"] = True
+            prompt, markup = _make_field_prompt(next_field, sequential=True)
+            await query.message.reply_text(prompt, reply_markup=markup)
+        else:
+            await query.message.reply_text(
+                render_report_preview(draft["values"], draft["template"]),
+                parse_mode=ParseMode.HTML,
+                reply_markup=report_fill_keyboard(draft["values"], draft["template"]),
+            )
         return
 
     if data == "submit_report":
@@ -759,17 +935,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         except Exception:
             pass
         await query.message.reply_text(f"✅ 报告 #{report_id} 已通过审核。")
-        approved_tpl = setting_get("review_approved_template", DEFAULT_SETTINGS["review_approved_template"])
-        feedback = approved_tpl.format(id=report_id)
+        feedback = _build_approval_feedback(report_id)
         await context.bot.send_message(chat_id=report["user_id"], text=feedback)
-        push_channel = setting_get("push_channel", "").strip()
-        if push_channel:
-            data_values = parse_json(report["data_json"], {})
-            detail = "\n".join([f"{k}: {v}" for k, v in data_values.items()])
-            await context.bot.send_message(
-                chat_id=push_channel,
-                text=f"📢 审核通过报告 #{report_id}\n@{report['username'] or 'unknown'}\n{detail}",
-            )
+        await _push_report_to_channel(context.bot, report_id, report)
         return
 
     if data.startswith("reject:"):
@@ -855,6 +1023,8 @@ textarea{resize:vertical;min-height:70px}
 .table td input{padding:5px 8px;border:1px solid #cbd5e1;border-radius:5px;font-size:.85rem;width:150px}
 .muted{color:#94a3b8;font-style:italic}
 .badge{display:inline-flex;align-items:center;justify-content:center;background:#ef4444;color:#fff;border-radius:10px;font-size:.7rem;font-weight:700;min-width:18px;height:18px;padding:0 5px;margin-left:4px;vertical-align:middle}
+.tpl-field-card{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;margin-bottom:10px;overflow:hidden}
+.tpl-field-card .editor-row{background:transparent;border:none;border-radius:0;margin-bottom:0}
 @media(max-width:600px){.field-row{grid-template-columns:1fr}}
 """
 
@@ -869,7 +1039,8 @@ _ADMIN_JS = """
       tabPanes.forEach(function(p){p.classList.remove('active');});
       btn.classList.add('active');
       document.getElementById('pane-'+btn.dataset.tab).classList.add('active');
-      if(saveBar) saveBar.style.display=btn.dataset.tab==='pending'?'none':'';
+      var noSaveTabs=['pending','broadcast'];
+      if(saveBar) saveBar.style.display=noSaveTabs.indexOf(btn.dataset.tab)>=0?'none':'';
     });
   });
 
@@ -934,10 +1105,14 @@ _ADMIN_JS = """
     sel.addEventListener('change',function(){
       valIn.style.display=sel.value==='text'?'':'none';
     });
+    var rowIn=document.createElement('input');
+    rowIn.type='text'; rowIn.placeholder='行号'; rowIn.value=item.row||'';
+    rowIn.dataset.field='row'; rowIn.style.width='50px'; rowIn.style.flex='none';
+    rowIn.title='相同行号的按钮同行显示，留空则独占一行';
     var rm=document.createElement('button');
     rm.type='button'; rm.textContent='✕'; rm.className='btn btn-danger btn-sm';
     rm.addEventListener('click',function(){row.remove();});
-    row.appendChild(textIn); row.appendChild(sel); row.appendChild(valIn); row.appendChild(rm);
+    row.appendChild(textIn); row.appendChild(sel); row.appendChild(valIn); row.appendChild(rowIn); row.appendChild(rm);
     return row;
   }
   kbData.forEach(function(item){kbRows.appendChild(makeKbRow(item));});
@@ -950,9 +1125,11 @@ _ADMIN_JS = """
       var text=row.querySelector('[data-field=text]').value.trim();
       var action=row.querySelector('[data-field=action]').value;
       var value=row.querySelector('[data-field=value]').value.trim();
+      var rowNum=row.querySelector('[data-field=row]').value.trim();
       if(text){
         var item={text:text,action:action};
         if(action==='text'&&value) item.value=value;
+        if(rowNum) item.row=rowNum;
         result.push(item);
       }
     });
@@ -965,29 +1142,55 @@ _ADMIN_JS = """
   var tplNameIn=document.getElementById('template-name');
   tplNameIn.value=tplData.name||'';
   function makeTplRow(field){
-    var row=document.createElement('div'); row.className='editor-row';
+    var card=document.createElement('div'); card.className='tpl-field-card';
+    // Row 1: key, label, type, required, remove
+    var row1=document.createElement('div'); row1.className='editor-row'; row1.style.marginBottom='4px';
     var keyIn=document.createElement('input');
     keyIn.type='text'; keyIn.placeholder='英文标识（如 title）'; keyIn.value=field.key||'';
-    keyIn.dataset.field='key';
+    keyIn.dataset.field='key'; keyIn.style.flex='1';
     var labelIn=document.createElement('input');
     labelIn.type='text'; labelIn.placeholder='显示名称（如 标题）'; labelIn.value=field.label||'';
-    labelIn.dataset.field='label';
+    labelIn.dataset.field='label'; labelIn.style.flex='1';
+    var typeSel=document.createElement('select');
+    typeSel.dataset.field='type'; typeSel.style.flex='none'; typeSel.style.width='80px';
+    [{value:'text',label:'文本'},{value:'photo',label:'图片'}].forEach(function(o){
+      var opt=document.createElement('option');
+      opt.value=o.value; opt.textContent=o.label;
+      if((field.type||'text')===o.value) opt.selected=true;
+      typeSel.appendChild(opt);
+    });
+    var reqLabel=document.createElement('label');
+    reqLabel.style.cssText='display:flex;align-items:center;gap:4px;font-weight:normal;font-size:.85rem;white-space:nowrap;flex:none;text-transform:none;letter-spacing:0;color:#475569;';
+    var reqCheck=document.createElement('input');
+    reqCheck.type='checkbox'; reqCheck.dataset.field='required'; reqCheck.style.margin='0';
+    reqCheck.checked=(field.required!==false);
+    reqLabel.appendChild(reqCheck); reqLabel.appendChild(document.createTextNode('必填'));
     var rm=document.createElement('button');
     rm.type='button'; rm.textContent='✕'; rm.className='btn btn-danger btn-sm';
-    rm.addEventListener('click',function(){row.remove();});
-    row.appendChild(keyIn); row.appendChild(labelIn); row.appendChild(rm);
-    return row;
+    rm.addEventListener('click',function(){card.remove();});
+    row1.appendChild(keyIn); row1.appendChild(labelIn); row1.appendChild(typeSel); row1.appendChild(reqLabel); row1.appendChild(rm);
+    // Row 2: hint input
+    var row2=document.createElement('div'); row2.style.cssText='padding:0 12px 10px;';
+    var hintIn=document.createElement('input');
+    hintIn.type='text'; hintIn.placeholder='字段说明（选填）：例如"请填写今日工作摘要"，显示给用户作为填写提示';
+    hintIn.value=field.hint||''; hintIn.dataset.field='hint'; hintIn.style.width='100%';
+    row2.appendChild(hintIn);
+    card.appendChild(row1); card.appendChild(row2);
+    return card;
   }
   (tplData.fields||[]).forEach(function(f){tplFieldsEl.appendChild(makeTplRow(f));});
   document.getElementById('template-add').addEventListener('click',function(){
-    tplFieldsEl.appendChild(makeTplRow({key:'',label:''}));
+    tplFieldsEl.appendChild(makeTplRow({key:'',label:'',hint:'',required:true,type:'text'}));
   });
   function serializeTemplate(){
     var fields=[];
-    tplFieldsEl.querySelectorAll('.editor-row').forEach(function(row){
-      var key=row.querySelector('[data-field=key]').value.trim();
-      var label=row.querySelector('[data-field=label]').value.trim();
-      if(key&&label) fields.push({key:key,label:label});
+    tplFieldsEl.querySelectorAll('.tpl-field-card').forEach(function(card){
+      var key=card.querySelector('[data-field=key]').value.trim();
+      var label=card.querySelector('[data-field=label]').value.trim();
+      var hint=card.querySelector('[data-field=hint]').value.trim();
+      var type=card.querySelector('[data-field=type]').value;
+      var required=card.querySelector('[data-field=required]').checked;
+      if(key&&label) fields.push({key:key,label:label,hint:hint,required:required,type:type});
     });
     var tpl={name:tplNameIn.value.trim()||'模板',fields:fields};
     document.getElementById('report_template_json').value=JSON.stringify(tpl);
@@ -998,11 +1201,46 @@ _ADMIN_JS = """
     serializeKb();
     serializeTemplate();
   });
+
+  // Broadcast Buttons Editor
+  var broadcastBtnsRows=document.getElementById('broadcast-btn-rows');
+  if(broadcastBtnsRows){
+    function makeBroadcastRow(item){
+      var row=document.createElement('div'); row.className='editor-row';
+      var textIn=document.createElement('input');
+      textIn.type='text'; textIn.placeholder='按钮文字'; textIn.value=item.text||'';
+      textIn.dataset.field='text'; textIn.style.flex='1';
+      var urlIn=document.createElement('input');
+      urlIn.type='text'; urlIn.placeholder='链接 URL（https://...）'; urlIn.value=item.url||'';
+      urlIn.dataset.field='url'; urlIn.style.flex='2';
+      var rm=document.createElement('button');
+      rm.type='button'; rm.textContent='✕'; rm.className='btn btn-danger btn-sm';
+      rm.addEventListener('click',function(){row.remove();});
+      row.appendChild(textIn); row.appendChild(urlIn); row.appendChild(rm);
+      return row;
+    }
+    document.getElementById('broadcast-btn-add').addEventListener('click',function(){
+      broadcastBtnsRows.appendChild(makeBroadcastRow({text:'',url:''}));
+    });
+    function serializeBroadcastBtns(){
+      var result=[];
+      broadcastBtnsRows.querySelectorAll('.editor-row').forEach(function(row){
+        var text=row.querySelector('[data-field=text]').value.trim();
+        var url=row.querySelector('[data-field=url]').value.trim();
+        if(text&&url) result.push({text:text,url:url});
+      });
+      document.getElementById('broadcast_buttons_json').value=JSON.stringify(result);
+    }
+    document.getElementById('broadcast-form').addEventListener('submit',function(){
+      serializeBroadcastBtns();
+      return confirm('确认向所有用户发送广播？');
+    });
+  }
 })();
 """
 
 
-def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] | None = None, saved: bool = False) -> str:
+def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] | None = None, saved: bool = False, user_count: int = 0) -> str:
     def e(key: str) -> str:
         return html.escape(settings_map.get(key, ""))
 
@@ -1091,6 +1329,7 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
   <button type="button" class="tab-btn" data-tab="texts">文本配置</button>
   <button type="button" class="tab-btn" data-tab="review">审核设置</button>
   <button type="button" class="tab-btn" data-tab="pending">待审核{pending_badge}</button>
+  <button type="button" class="tab-btn" data-tab="broadcast">广播</button>
 </div>
 
 <form id="settings-form" method="post" action="/admin/save">
@@ -1148,7 +1387,7 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
 
 <div id="pane-keyboard" class="tab-pane">
   <p class="section-title">底部快捷键盘</p>
-  <div class="hint" style="margin-bottom:14px">配置用户输入框下方的快捷按钮。可绑定内置功能，也可自定义回复内容。</div>
+  <div class="hint" style="margin-bottom:14px">配置用户输入框下方的快捷按钮。可绑定内置功能，也可自定义回复内容。"行号"相同的按钮将显示在同一行（留空则独占一行）。</div>
   <div id="kb-rows"></div>
   <button type="button" class="btn-add" id="kb-add">＋ 添加按钮</button>
   <input type="hidden" name="keyboard_buttons_json" id="keyboard_buttons_json">
@@ -1163,7 +1402,7 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
   </div>
   <div class="field">
     <label>模板字段</label>
-    <div class="hint" style="margin-bottom:10px">字段标识用英文（作为数据键名），字段名称用中文（显示给用户）</div>
+    <div class="hint" style="margin-bottom:10px">每个字段可设置：英文标识（键名）、显示名称、类型（文本/图片）、是否必填、字段说明（提示用户如何填写）</div>
     <div id="template-fields"></div>
     <button type="button" class="btn-add" id="template-add">＋ 添加字段</button>
   </div>
@@ -1191,12 +1430,17 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
   <div class="field">
     <label>审核通过 — 通知模板</label>
     <input type="text" name="review_approved_template" value="{e('review_approved_template')}">
-    <div class="hint">使用 {{id}} 表示报告编号，例如：✅ 报告 #{{id}} 审核通过。</div>
+    <div class="hint">使用 {{id}} 表示报告编号，{{link}} 表示报告链接，例如：✅ 报告 #{{id}} 审核通过。{{link}}</div>
   </div>
   <div class="field">
     <label>审核驳回 — 通知模板</label>
     <input type="text" name="review_rejected_template" value="{e('review_rejected_template')}">
     <div class="hint">使用 {{id}} 表示编号，{{reason}} 表示驳回原因，例如：❌ 报告 #{{id}} 未通过：{{reason}}</div>
+  </div>
+  <div class="field">
+    <label>推送频道 — 推送模板</label>
+    <textarea name="push_template" rows="4">{e('push_template')}</textarea>
+    <div class="hint">审核通过后推送到频道的消息模板，支持：{{id}} 报告编号、{{username}} 用户名、{{detail}} 报告内容、{{link}} 报告链接</div>
   </div>
 </div>
 
@@ -1211,12 +1455,103 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
   {pending_html}
 </div>
 
+<div id="pane-broadcast" class="tab-pane">
+  <p class="section-title">广播发送（共 {user_count} 位用户曾使用机器人）</p>
+  <form id="broadcast-form" method="post" action="/admin/broadcast">
+    <div class="field">
+      <label>广播文本</label>
+      <textarea name="broadcast_text" rows="5" placeholder="支持 HTML 格式：&lt;b&gt;加粗&lt;/b&gt;、&lt;i&gt;斜体&lt;/i&gt;、&lt;a href='...'&gt;链接&lt;/a&gt;"></textarea>
+    </div>
+    <div class="field-row">
+      <div class="field">
+        <label>媒体类型</label>
+        <select name="broadcast_media_type">
+          <option value="">无</option>
+          <option value="photo">图片</option>
+          <option value="video">视频</option>
+        </select>
+        <div class="hint">选择后需在右侧填写对应的媒体 URL</div>
+      </div>
+      <div class="field">
+        <label>媒体 URL</label>
+        <input type="text" name="broadcast_media_url" placeholder="https://...">
+        <div class="hint">图片或视频的直链地址</div>
+      </div>
+    </div>
+    <div class="field">
+      <label>内联按钮（可选）</label>
+      <div class="hint" style="margin-bottom:8px">每行一个按钮，点击后跳转链接</div>
+      <div id="broadcast-btn-rows"></div>
+      <button type="button" class="btn-add" id="broadcast-btn-add">＋ 添加按钮</button>
+      <input type="hidden" name="broadcast_buttons_json" id="broadcast_buttons_json">
+    </div>
+    <div style="margin-top:16px">
+      <button type="submit" class="btn btn-primary">📢 发送广播</button>
+    </div>
+  </form>
+</div>
+
 </div>
 </div>
 <script>{js}</script>
 </body>
 </html>
 """
+
+
+async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.message.photo:
+        return
+
+    user = update.effective_user
+    upsert_user(user.id, user.username)
+
+    channel = setting_get("force_sub_channel", "").strip()
+    if channel and not await is_subscribed(context.bot, user.id):
+        rows = [[InlineKeyboardButton("我已订阅，重新检测", callback_data="retry_sub")]]
+        channel_link = build_channel_link(channel)
+        if channel_link:
+            rows.insert(0, [InlineKeyboardButton("先去订阅", url=channel_link)])
+        markup = InlineKeyboardMarkup(rows)
+        await update.message.reply_text("请先订阅频道后再使用机器人。", reply_markup=markup)
+        return
+
+    draft = context.user_data.get("report_draft")
+    if not draft or not draft.get("awaiting"):
+        await update.message.reply_text("未识别操作，请使用底部菜单。")
+        return
+
+    key = draft["awaiting"]
+    field_def = next((f for f in draft["template"]["fields"] if f["key"] == key), {})
+    if field_def.get("type", "text") != "photo":
+        await update.message.reply_text(
+            f"请输入文字（不是图片），作为「{field_def.get('label', key)}」字段。"
+        )
+        return
+
+    # Use the last (highest-resolution) photo variant provided by Telegram
+    file_id = update.message.photo[-1].file_id
+    draft["values"][key] = file_id
+    draft["awaiting"] = ""
+    sequential = draft.pop("sequential", False)
+
+    if sequential:
+        fields = draft["template"]["fields"]
+        current_idx = next((i for i, f in enumerate(fields) if f["key"] == key), -1)
+        next_idx = current_idx + 1
+        if next_idx < len(fields):
+            next_field = fields[next_idx]
+            draft["awaiting"] = next_field["key"]
+            draft["sequential"] = True
+            prompt, markup = _make_field_prompt(next_field, sequential=True)
+            await update.message.reply_text(prompt, reply_markup=markup)
+            return
+
+    await update.message.reply_text(
+        render_report_preview(draft["values"], draft["template"]),
+        parse_mode=ParseMode.HTML,
+        reply_markup=report_fill_keyboard(draft["values"], draft["template"]),
+    )
 
 
 async def ptb_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1237,6 +1572,7 @@ def create_bot_application(token: str) -> Application:
     app.add_handler(CommandHandler("approve", approve_cmd))
     app.add_handler(CommandHandler("reject", reject_cmd))
     app.add_handler(CallbackQueryHandler(on_callback))
+    app.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, on_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     return app
 
@@ -1369,9 +1705,11 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
             pending_rows = conn.execute(
                 "SELECT id, username, created_at FROM reports WHERE status = 'pending' ORDER BY id DESC LIMIT 50"
             ).fetchall()
+            user_count_row = conn.execute("SELECT COUNT(*) as cnt FROM users").fetchone()
         settings_map = {r["key"]: r["value"] for r in rows}
         pending_list = [dict(r) for r in pending_rows]
-        response = HTMLResponse(build_admin_html(settings_map, pending_list, saved=saved))
+        user_count = user_count_row["cnt"] if user_count_row else 0
+        response = HTMLResponse(build_admin_html(settings_map, pending_list, saved=saved, user_count=user_count))
         if should_set_cookie:
             response.set_cookie(
                 key="admin_token",
@@ -1394,6 +1732,7 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
         keyboard_buttons_json: str = Form("[]"),
         review_approved_template: str = Form(""),
         review_rejected_template: str = Form(""),
+        push_template: str = Form(""),
         report_template_json: str = Form("{}"),
         contact_text: str = Form(""),
         usage_text: str = Form(""),
@@ -1425,6 +1764,7 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
             "keyboard_buttons_json": json.dumps(keyboard_buttons_obj, ensure_ascii=False),
             "review_approved_template": review_approved_template,
             "review_rejected_template": review_rejected_template,
+            "push_template": push_template,
             "report_template_json": json.dumps(report_template_obj, ensure_ascii=False),
             "contact_text": contact_text,
             "usage_text": usage_text,
@@ -1457,23 +1797,15 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
                 "UPDATE reports SET status='approved', reviewed_at=? WHERE id = ?",
                 (utc_now_iso(), report_id),
             )
-        approved_tpl = setting_get("review_approved_template", DEFAULT_SETTINGS["review_approved_template"])
-        feedback = approved_tpl.format(id=report_id)
+        feedback = _build_approval_feedback(report_id)
         try:
             await web.state.tg_application.bot.send_message(chat_id=report["user_id"], text=feedback)
         except Exception:
             logger.warning("failed to notify user %s of approval", report["user_id"], exc_info=True)
-        push_channel = setting_get("push_channel", "").strip()
-        if push_channel:
-            data_values = parse_json(report["data_json"], {})
-            detail = "\n".join([f"{k}: {v}" for k, v in data_values.items()])
-            try:
-                await web.state.tg_application.bot.send_message(
-                    chat_id=push_channel,
-                    text=f"📢 审核通过报告 #{report_id}\n@{report['username'] or 'unknown'}\n{detail}",
-                )
-            except Exception:
-                logger.warning("failed to push report %s to channel", report_id, exc_info=True)
+        try:
+            await _push_report_to_channel(web.state.tg_application.bot, report_id, report)
+        except Exception:
+            logger.warning("failed to push report %s to channel", report_id, exc_info=True)
         safe_id = html.escape(str(report_id))
         return HTMLResponse(f"<html><body>报告 #{safe_id} 已通过。<a href='/admin'>返回</a></body></html>")
 
@@ -1499,6 +1831,86 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
             logger.warning("failed to notify user %s of rejection", report["user_id"], exc_info=True)
         safe_id = html.escape(str(report_id))
         return HTMLResponse(f"<html><body>报告 #{safe_id} 已驳回。<a href='/admin'>返回</a></body></html>")
+
+    async def _do_broadcast(
+        bot: Bot,
+        user_ids: list[int],
+        text: str,
+        media_type: str,
+        media_url: str,
+        markup: InlineKeyboardMarkup | None,
+    ) -> None:
+        # Send in batches with a short delay to stay within Telegram rate limits
+        _BATCH_SIZE = 25
+        _BATCH_DELAY = 1.0  # seconds between batches
+        for batch_start in range(0, len(user_ids), _BATCH_SIZE):
+            batch = user_ids[batch_start : batch_start + _BATCH_SIZE]
+            for uid in batch:
+                try:
+                    if media_type == "photo" and media_url:
+                        await bot.send_photo(
+                            chat_id=uid,
+                            photo=media_url,
+                            caption=text or None,
+                            parse_mode=ParseMode.HTML if text else None,
+                            reply_markup=markup,
+                        )
+                    elif media_type == "video" and media_url:
+                        await bot.send_video(
+                            chat_id=uid,
+                            video=media_url,
+                            caption=text or None,
+                            parse_mode=ParseMode.HTML if text else None,
+                            reply_markup=markup,
+                        )
+                    elif text:
+                        await bot.send_message(
+                            chat_id=uid,
+                            text=text,
+                            parse_mode=ParseMode.HTML,
+                            reply_markup=markup,
+                        )
+                except Exception:
+                    logger.warning("broadcast failed for user %s", uid, exc_info=True)
+            if batch_start + _BATCH_SIZE < len(user_ids):
+                await asyncio.sleep(_BATCH_DELAY)
+
+    @web.post("/admin/broadcast")
+    async def admin_broadcast(
+        request: Request,
+        background_tasks: BackgroundTasks,
+        broadcast_text: str = Form(""),
+        broadcast_media_type: str = Form(""),
+        broadcast_media_url: str = Form(""),
+        broadcast_buttons_json: str = Form("[]"),
+    ):
+        if redirect := _auth(request):
+            return redirect
+        with db_connection() as conn:
+            user_rows = conn.execute("SELECT user_id FROM users").fetchall()
+        user_ids = [r["user_id"] for r in user_rows]
+        buttons_obj = parse_json(broadcast_buttons_json, [])
+        markup: InlineKeyboardMarkup | None = None
+        if isinstance(buttons_obj, list) and buttons_obj:
+            btns: list[list[InlineKeyboardButton]] = []
+            for item in buttons_obj:
+                if isinstance(item, dict) and item.get("text") and item.get("url"):
+                    btns.append([InlineKeyboardButton(str(item["text"]), url=str(item["url"]))])
+            if btns:
+                markup = InlineKeyboardMarkup(btns)
+        background_tasks.add_task(
+            _do_broadcast,
+            web.state.tg_application.bot,
+            user_ids,
+            broadcast_text,
+            broadcast_media_type.strip(),
+            broadcast_media_url.strip(),
+            markup,
+        )
+        safe_count = html.escape(str(len(user_ids)))
+        return HTMLResponse(
+            f"<html><body>广播任务已提交，将向 {safe_count} 位用户发送。<a href='/admin'>返回</a></body></html>"
+        )
 
     return web
 
