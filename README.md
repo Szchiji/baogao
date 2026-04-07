@@ -6,10 +6,15 @@
 
 ```
 baogao/
-└── backend/    # Python 后端项目（FastAPI + aiogram + PostgreSQL）
+├── app/          # Python 后端项目（FastAPI + aiogram + PostgreSQL）
+├── alembic/      # 数据库迁移
+├── scripts/      # 工具脚本
+├── requirements.txt
+├── alembic.ini
+└── .env.example
 ```
 
-> 注：Python 后端位于 `backend/` 目录，详细说明请参见 [backend/README.md](backend/README.md)。
+> 详细后端说明请参见 [BACKEND_README.md](BACKEND_README.md)。
 
 ## 技术栈
 
@@ -27,5 +32,5 @@ baogao/
    - `BOT_MODE`：`webhook`（生产）或 `polling`（开发）
    - `WEBHOOK_URL`：Railway 应用 URL（webhook 模式时需要）
    - `JWT_SECRET`：随机字符串（请修改默认值！）
-4. 设置 Start Command：`cd backend && alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+4. 设置 Start Command：`alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT`
 5. 可选：部署后运行 `python scripts/seed_template.py` 初始化示例模板

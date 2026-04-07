@@ -20,7 +20,6 @@
 ### 1. 安装依赖
 
 ```bash
-cd backend
 pip install -r requirements.txt
 ```
 
@@ -148,7 +147,7 @@ alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT
 ## 项目结构
 
 ```
-backend/
+baogao/
 ├── app/
 │   ├── main.py              # FastAPI 应用入口
 │   ├── config.py            # pydantic-settings 配置
