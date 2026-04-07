@@ -312,7 +312,7 @@ def build_channel_link(channel: str) -> str | None:
     if value.startswith("https://t.me/"):
         return value
     # Private/supergroup chat IDs are numeric and commonly start with -100, no public t.me link.
-    if value.isdigit() or value.startswith("-100"):
+    if value.lstrip("-").isdigit() or value.startswith("-100"):
         return None
     return f"https://t.me/{value}"
 
