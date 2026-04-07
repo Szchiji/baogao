@@ -235,12 +235,27 @@ def start_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 
-def start_inline_buttons() -> InlineKeyboardMarkup | None:
+def _is_admin_entry_button(text: str, url: str) -> bool:
+    lowered_text = text.strip().lower()
+    lowered_url = url.strip().lower()
+    if "管理后台" in text:
+        return True
+    if "admin" in lowered_text:
+        return True
+    return "/admin" in lowered_url
+
+
+def start_inline_buttons(user_id: int | None = None) -> InlineKeyboardMarkup | None:
     raw_buttons = parse_json(setting_get("start_buttons_json"), [])
+    is_admin = bool(user_id is not None and is_user_admin(user_id))
     buttons: list[list[InlineKeyboardButton]] = []
     for item in raw_buttons:
         if isinstance(item, dict) and item.get("text") and item.get("url"):
-            buttons.append([InlineKeyboardButton(str(item["text"]), url=str(item["url"]))])
+            text = str(item["text"])
+            url = str(item["url"])
+            if not is_admin and _is_admin_entry_button(text, url):
+                continue
+            buttons.append([InlineKeyboardButton(text, url=url)])
     return InlineKeyboardMarkup(buttons) if buttons else None
 
 
@@ -284,7 +299,8 @@ async def send_start_content(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text = setting_get("start_text", DEFAULT_SETTINGS["start_text"])
     media_type = setting_get("start_media_type", "").strip().lower()
     media_url = setting_get("start_media_url", "").strip()
-    inline_markup = start_inline_buttons()
+    user_id = update.effective_user.id if update.effective_user else None
+    inline_markup = start_inline_buttons(user_id=user_id)
     keyboard = start_keyboard()
     if media_type == "photo" and media_url:
         await update.effective_chat.send_photo(
