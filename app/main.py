@@ -13,7 +13,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import uvicorn
-from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from telegram import (
     Bot,
@@ -66,6 +66,7 @@ DEFAULT_SETTINGS: dict[str, str] = {
     ),
     "review_approved_template": "✅ 报告 #{id} 审核通过。",
     "review_rejected_template": "❌ 报告 #{id} 审核未通过：{reason}",
+    "push_template": "📢 审核通过报告 #{id}\n@{username}\n{detail}",
     "report_template_json": json.dumps(
         {
             "name": "默认模板",
@@ -154,6 +155,16 @@ def init_db() -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status, id DESC)"
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+              user_id INTEGER PRIMARY KEY,
+              username TEXT,
+              first_seen TEXT NOT NULL,
+              last_seen TEXT NOT NULL
+            )
+            """
+        )
         for key, value in DEFAULT_SETTINGS.items():
             conn.execute(
                 "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (key, value)
@@ -184,6 +195,31 @@ def parse_json(raw: str, fallback: Any) -> Any:
         return fallback
 
 
+class _SafeDict(dict):
+    def __missing__(self, key: str) -> str:
+        return "{" + key + "}"
+
+
+def safe_format(template: str, **kwargs: Any) -> str:
+    """Format template with kwargs; unknown placeholders are left as-is."""
+    try:
+        return template.format_map(_SafeDict(**{k: str(v) for k, v in kwargs.items()}))
+    except (ValueError, KeyError):
+        return template
+
+
+def upsert_user(user_id: int, username: str | None) -> None:
+    now = utc_now_iso()
+    with db_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO users (user_id, username, first_seen, last_seen) VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET username=excluded.username, last_seen=excluded.last_seen
+            """,
+            (user_id, username or "", now, now),
+        )
+
+
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -196,13 +232,14 @@ def keyboard_config() -> list[dict[str, str]]:
             normalized.append({"text": item, "action": "text"})
             continue
         if isinstance(item, dict) and item.get("text"):
-            normalized.append(
-                {
-                    "text": str(item.get("text")),
-                    "action": str(item.get("action", "text")),
-                    "value": str(item.get("value", "")),
-                }
-            )
+            entry: dict[str, str] = {
+                "text": str(item.get("text")),
+                "action": str(item.get("action", "text")),
+                "value": str(item.get("value", "")),
+            }
+            if item.get("row") is not None and str(item.get("row")).strip():
+                entry["row"] = str(item.get("row")).strip()
+            normalized.append(entry)
     return normalized
 
 
@@ -233,9 +270,33 @@ async def is_subscribed(bot: Bot, user_id: int) -> bool:
 
 
 def start_keyboard() -> ReplyKeyboardMarkup:
-    rows = [[KeyboardButton(item["text"])] for item in keyboard_config()]
-    if not rows:
-        rows = [[KeyboardButton("写报告")], [KeyboardButton("查阅报告")]]
+    items = keyboard_config()
+    if not items:
+        return ReplyKeyboardMarkup(
+            [[KeyboardButton("写报告")], [KeyboardButton("查阅报告")]], resize_keyboard=True
+        )
+    rows: list[list[KeyboardButton]] = []
+    current_row_key: str | None = None
+    current_row: list[KeyboardButton] = []
+    for item in items:
+        row_val = item.get("row", "")
+        btn = KeyboardButton(item["text"])
+        if row_val:
+            if row_val == current_row_key:
+                current_row.append(btn)
+            else:
+                if current_row:
+                    rows.append(current_row)
+                current_row = [btn]
+                current_row_key = row_val
+        else:
+            if current_row:
+                rows.append(current_row)
+                current_row = []
+                current_row_key = None
+            rows.append([btn])
+    if current_row:
+        rows.append(current_row)
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 
@@ -368,6 +429,7 @@ def build_channel_link(channel: str) -> str | None:
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
+    upsert_user(user_id, update.effective_user.username)
     channel = setting_get("force_sub_channel", "").strip()
     if channel and not await is_subscribed(context.bot, user_id):
         rows = [[InlineKeyboardButton("我已订阅，重新检测", callback_data="retry_sub")]]
@@ -464,9 +526,17 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     text = message_text.strip()
 
+    user = update.effective_user
+    upsert_user(user.id, user.username)
+
     channel = setting_get("force_sub_channel", "").strip()
     if channel and not await is_subscribed(context.bot, update.effective_user.id):
-        await update.message.reply_text("请先完成频道订阅后再使用。")
+        rows = [[InlineKeyboardButton("我已订阅，重新检测", callback_data="retry_sub")]]
+        channel_link = build_channel_link(channel)
+        if channel_link:
+            rows.insert(0, [InlineKeyboardButton("先去订阅", url=channel_link)])
+        markup = InlineKeyboardMarkup(rows)
+        await update.message.reply_text("请先订阅频道后再使用机器人。", reply_markup=markup)
         return
 
     # Admin reject-reason flow: only when admin is NOT mid-draft to avoid ambiguity
@@ -610,7 +680,36 @@ async def submit_report(context: ContextTypes.DEFAULT_TYPE, update: Update) -> N
                 )
 
 
-async def pending_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+def _build_approval_feedback(report_id: int) -> str:
+    approved_tpl = setting_get("review_approved_template", DEFAULT_SETTINGS["review_approved_template"])
+    link_base = setting_get("report_link_base", "").strip()
+    link = f"{link_base.rstrip('/')}/reports/{report_id}" if link_base else ""
+    return safe_format(approved_tpl, id=report_id, link=link)
+
+
+async def _push_report_to_channel(bot: Bot, report_id: int, report: sqlite3.Row) -> None:
+    push_channel = setting_get("push_channel", "").strip()
+    if not push_channel:
+        return
+    data_values = parse_json(report["data_json"], {})
+    link_base = setting_get("report_link_base", "").strip()
+    link = f"{link_base.rstrip('/')}/reports/{report_id}" if link_base else ""
+    detail = "\n".join([f"{k}: {v}" for k, v in data_values.items()])
+    push_tpl = setting_get("push_template", DEFAULT_SETTINGS["push_template"])
+    push_text = safe_format(
+        push_tpl,
+        id=report_id,
+        username=report["username"] or "unknown",
+        detail=detail,
+        link=link,
+    )
+    try:
+        await bot.send_message(chat_id=push_channel, text=push_text)
+    except Exception:
+        logger.warning("failed to push report %s to channel", report_id, exc_info=True)
+
+
+
     if not is_user_admin(update.effective_user.id):
         await update.message.reply_text("无权限。")
         return
@@ -651,18 +750,10 @@ async def approve_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
     await update.message.reply_text(f"报告 #{report_id} 已通过。")
 
-    approved_tpl = setting_get("review_approved_template", DEFAULT_SETTINGS["review_approved_template"])
-    feedback = approved_tpl.format(id=report_id)
+    feedback = _build_approval_feedback(report_id)
     await context.bot.send_message(chat_id=report["user_id"], text=feedback)
 
-    push_channel = setting_get("push_channel", "").strip()
-    if push_channel:
-        data = parse_json(report["data_json"], {})
-        detail = "\n".join([f"{k}: {v}" for k, v in data.items()])
-        await context.bot.send_message(
-            chat_id=push_channel,
-            text=f"📢 审核通过报告 #{report_id}\n@{report['username'] or 'unknown'}\n{detail}",
-        )
+    await _push_report_to_channel(context.bot, report_id, report)
 
 
 async def reject_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -759,17 +850,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         except Exception:
             pass
         await query.message.reply_text(f"✅ 报告 #{report_id} 已通过审核。")
-        approved_tpl = setting_get("review_approved_template", DEFAULT_SETTINGS["review_approved_template"])
-        feedback = approved_tpl.format(id=report_id)
+        feedback = _build_approval_feedback(report_id)
         await context.bot.send_message(chat_id=report["user_id"], text=feedback)
-        push_channel = setting_get("push_channel", "").strip()
-        if push_channel:
-            data_values = parse_json(report["data_json"], {})
-            detail = "\n".join([f"{k}: {v}" for k, v in data_values.items()])
-            await context.bot.send_message(
-                chat_id=push_channel,
-                text=f"📢 审核通过报告 #{report_id}\n@{report['username'] or 'unknown'}\n{detail}",
-            )
+        await _push_report_to_channel(context.bot, report_id, report)
         return
 
     if data.startswith("reject:"):
@@ -869,7 +952,8 @@ _ADMIN_JS = """
       tabPanes.forEach(function(p){p.classList.remove('active');});
       btn.classList.add('active');
       document.getElementById('pane-'+btn.dataset.tab).classList.add('active');
-      if(saveBar) saveBar.style.display=btn.dataset.tab==='pending'?'none':'';
+      var noSaveTabs=['pending','broadcast'];
+      if(saveBar) saveBar.style.display=noSaveTabs.indexOf(btn.dataset.tab)>=0?'none':'';
     });
   });
 
@@ -934,10 +1018,14 @@ _ADMIN_JS = """
     sel.addEventListener('change',function(){
       valIn.style.display=sel.value==='text'?'':'none';
     });
+    var rowIn=document.createElement('input');
+    rowIn.type='text'; rowIn.placeholder='行号'; rowIn.value=item.row||'';
+    rowIn.dataset.field='row'; rowIn.style.width='50px'; rowIn.style.flex='none';
+    rowIn.title='相同行号的按钮同行显示，留空则独占一行';
     var rm=document.createElement('button');
     rm.type='button'; rm.textContent='✕'; rm.className='btn btn-danger btn-sm';
     rm.addEventListener('click',function(){row.remove();});
-    row.appendChild(textIn); row.appendChild(sel); row.appendChild(valIn); row.appendChild(rm);
+    row.appendChild(textIn); row.appendChild(sel); row.appendChild(valIn); row.appendChild(rowIn); row.appendChild(rm);
     return row;
   }
   kbData.forEach(function(item){kbRows.appendChild(makeKbRow(item));});
@@ -950,9 +1038,11 @@ _ADMIN_JS = """
       var text=row.querySelector('[data-field=text]').value.trim();
       var action=row.querySelector('[data-field=action]').value;
       var value=row.querySelector('[data-field=value]').value.trim();
+      var rowNum=row.querySelector('[data-field=row]').value.trim();
       if(text){
         var item={text:text,action:action};
         if(action==='text'&&value) item.value=value;
+        if(rowNum) item.row=rowNum;
         result.push(item);
       }
     });
@@ -998,11 +1088,46 @@ _ADMIN_JS = """
     serializeKb();
     serializeTemplate();
   });
+
+  // Broadcast Buttons Editor
+  var broadcastBtnsRows=document.getElementById('broadcast-btn-rows');
+  if(broadcastBtnsRows){
+    function makeBroadcastRow(item){
+      var row=document.createElement('div'); row.className='editor-row';
+      var textIn=document.createElement('input');
+      textIn.type='text'; textIn.placeholder='按钮文字'; textIn.value=item.text||'';
+      textIn.dataset.field='text'; textIn.style.flex='1';
+      var urlIn=document.createElement('input');
+      urlIn.type='text'; urlIn.placeholder='链接 URL（https://...）'; urlIn.value=item.url||'';
+      urlIn.dataset.field='url'; urlIn.style.flex='2';
+      var rm=document.createElement('button');
+      rm.type='button'; rm.textContent='✕'; rm.className='btn btn-danger btn-sm';
+      rm.addEventListener('click',function(){row.remove();});
+      row.appendChild(textIn); row.appendChild(urlIn); row.appendChild(rm);
+      return row;
+    }
+    document.getElementById('broadcast-btn-add').addEventListener('click',function(){
+      broadcastBtnsRows.appendChild(makeBroadcastRow({text:'',url:''}));
+    });
+    function serializeBroadcastBtns(){
+      var result=[];
+      broadcastBtnsRows.querySelectorAll('.editor-row').forEach(function(row){
+        var text=row.querySelector('[data-field=text]').value.trim();
+        var url=row.querySelector('[data-field=url]').value.trim();
+        if(text&&url) result.push({text:text,url:url});
+      });
+      document.getElementById('broadcast_buttons_json').value=JSON.stringify(result);
+    }
+    document.getElementById('broadcast-form').addEventListener('submit',function(){
+      serializeBroadcastBtns();
+      return confirm('确认向所有用户发送广播？');
+    });
+  }
 })();
 """
 
 
-def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] | None = None, saved: bool = False) -> str:
+def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] | None = None, saved: bool = False, user_count: int = 0) -> str:
     def e(key: str) -> str:
         return html.escape(settings_map.get(key, ""))
 
@@ -1091,6 +1216,7 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
   <button type="button" class="tab-btn" data-tab="texts">文本配置</button>
   <button type="button" class="tab-btn" data-tab="review">审核设置</button>
   <button type="button" class="tab-btn" data-tab="pending">待审核{pending_badge}</button>
+  <button type="button" class="tab-btn" data-tab="broadcast">广播</button>
 </div>
 
 <form id="settings-form" method="post" action="/admin/save">
@@ -1148,7 +1274,7 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
 
 <div id="pane-keyboard" class="tab-pane">
   <p class="section-title">底部快捷键盘</p>
-  <div class="hint" style="margin-bottom:14px">配置用户输入框下方的快捷按钮。可绑定内置功能，也可自定义回复内容。</div>
+  <div class="hint" style="margin-bottom:14px">配置用户输入框下方的快捷按钮。可绑定内置功能，也可自定义回复内容。"行号"相同的按钮将显示在同一行（留空则独占一行）。</div>
   <div id="kb-rows"></div>
   <button type="button" class="btn-add" id="kb-add">＋ 添加按钮</button>
   <input type="hidden" name="keyboard_buttons_json" id="keyboard_buttons_json">
@@ -1191,12 +1317,17 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
   <div class="field">
     <label>审核通过 — 通知模板</label>
     <input type="text" name="review_approved_template" value="{e('review_approved_template')}">
-    <div class="hint">使用 {{id}} 表示报告编号，例如：✅ 报告 #{{id}} 审核通过。</div>
+    <div class="hint">使用 {{id}} 表示报告编号，{{link}} 表示报告链接，例如：✅ 报告 #{{id}} 审核通过。{{link}}</div>
   </div>
   <div class="field">
     <label>审核驳回 — 通知模板</label>
     <input type="text" name="review_rejected_template" value="{e('review_rejected_template')}">
     <div class="hint">使用 {{id}} 表示编号，{{reason}} 表示驳回原因，例如：❌ 报告 #{{id}} 未通过：{{reason}}</div>
+  </div>
+  <div class="field">
+    <label>推送频道 — 推送模板</label>
+    <textarea name="push_template" rows="4">{e('push_template')}</textarea>
+    <div class="hint">审核通过后推送到频道的消息模板，支持：{{id}} 报告编号、{{username}} 用户名、{{detail}} 报告内容、{{link}} 报告链接</div>
   </div>
 </div>
 
@@ -1209,6 +1340,42 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
 <div id="pane-pending" class="tab-pane">
   <p class="section-title">待审核报告（{pending_count} 条）</p>
   {pending_html}
+</div>
+
+<div id="pane-broadcast" class="tab-pane">
+  <p class="section-title">广播发送（共 {user_count} 位用户曾使用机器人）</p>
+  <form id="broadcast-form" method="post" action="/admin/broadcast">
+    <div class="field">
+      <label>广播文本</label>
+      <textarea name="broadcast_text" rows="5" placeholder="支持 HTML 格式：&lt;b&gt;加粗&lt;/b&gt;、&lt;i&gt;斜体&lt;/i&gt;、&lt;a href=&quot;...&quot;&gt;链接&lt;/a&gt;"></textarea>
+    </div>
+    <div class="field-row">
+      <div class="field">
+        <label>媒体类型</label>
+        <select name="broadcast_media_type">
+          <option value="">无</option>
+          <option value="photo">图片</option>
+          <option value="video">视频</option>
+        </select>
+        <div class="hint">选择后需在右侧填写对应的媒体 URL</div>
+      </div>
+      <div class="field">
+        <label>媒体 URL</label>
+        <input type="text" name="broadcast_media_url" placeholder="https://...">
+        <div class="hint">图片或视频的直链地址</div>
+      </div>
+    </div>
+    <div class="field">
+      <label>内联按钮（可选）</label>
+      <div class="hint" style="margin-bottom:8px">每行一个按钮，点击后跳转链接</div>
+      <div id="broadcast-btn-rows"></div>
+      <button type="button" class="btn-add" id="broadcast-btn-add">＋ 添加按钮</button>
+      <input type="hidden" name="broadcast_buttons_json" id="broadcast_buttons_json">
+    </div>
+    <div style="margin-top:16px">
+      <button type="submit" class="btn btn-primary">📢 发送广播</button>
+    </div>
+  </form>
 </div>
 
 </div>
@@ -1369,9 +1536,11 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
             pending_rows = conn.execute(
                 "SELECT id, username, created_at FROM reports WHERE status = 'pending' ORDER BY id DESC LIMIT 50"
             ).fetchall()
+            user_count_row = conn.execute("SELECT COUNT(*) as cnt FROM users").fetchone()
         settings_map = {r["key"]: r["value"] for r in rows}
         pending_list = [dict(r) for r in pending_rows]
-        response = HTMLResponse(build_admin_html(settings_map, pending_list, saved=saved))
+        user_count = user_count_row["cnt"] if user_count_row else 0
+        response = HTMLResponse(build_admin_html(settings_map, pending_list, saved=saved, user_count=user_count))
         if should_set_cookie:
             response.set_cookie(
                 key="admin_token",
@@ -1394,6 +1563,7 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
         keyboard_buttons_json: str = Form("[]"),
         review_approved_template: str = Form(""),
         review_rejected_template: str = Form(""),
+        push_template: str = Form(""),
         report_template_json: str = Form("{}"),
         contact_text: str = Form(""),
         usage_text: str = Form(""),
@@ -1425,6 +1595,7 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
             "keyboard_buttons_json": json.dumps(keyboard_buttons_obj, ensure_ascii=False),
             "review_approved_template": review_approved_template,
             "review_rejected_template": review_rejected_template,
+            "push_template": push_template,
             "report_template_json": json.dumps(report_template_obj, ensure_ascii=False),
             "contact_text": contact_text,
             "usage_text": usage_text,
@@ -1457,23 +1628,15 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
                 "UPDATE reports SET status='approved', reviewed_at=? WHERE id = ?",
                 (utc_now_iso(), report_id),
             )
-        approved_tpl = setting_get("review_approved_template", DEFAULT_SETTINGS["review_approved_template"])
-        feedback = approved_tpl.format(id=report_id)
+        feedback = _build_approval_feedback(report_id)
         try:
             await web.state.tg_application.bot.send_message(chat_id=report["user_id"], text=feedback)
         except Exception:
             logger.warning("failed to notify user %s of approval", report["user_id"], exc_info=True)
-        push_channel = setting_get("push_channel", "").strip()
-        if push_channel:
-            data_values = parse_json(report["data_json"], {})
-            detail = "\n".join([f"{k}: {v}" for k, v in data_values.items()])
-            try:
-                await web.state.tg_application.bot.send_message(
-                    chat_id=push_channel,
-                    text=f"📢 审核通过报告 #{report_id}\n@{report['username'] or 'unknown'}\n{detail}",
-                )
-            except Exception:
-                logger.warning("failed to push report %s to channel", report_id, exc_info=True)
+        try:
+            await _push_report_to_channel(web.state.tg_application.bot, report_id, report)
+        except Exception:
+            logger.warning("failed to push report %s to channel", report_id, exc_info=True)
         safe_id = html.escape(str(report_id))
         return HTMLResponse(f"<html><body>报告 #{safe_id} 已通过。<a href='/admin'>返回</a></body></html>")
 
@@ -1499,6 +1662,79 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
             logger.warning("failed to notify user %s of rejection", report["user_id"], exc_info=True)
         safe_id = html.escape(str(report_id))
         return HTMLResponse(f"<html><body>报告 #{safe_id} 已驳回。<a href='/admin'>返回</a></body></html>")
+
+    async def _do_broadcast(
+        bot: Bot,
+        user_ids: list[int],
+        text: str,
+        media_type: str,
+        media_url: str,
+        markup: InlineKeyboardMarkup | None,
+    ) -> None:
+        for uid in user_ids:
+            try:
+                if media_type == "photo" and media_url:
+                    await bot.send_photo(
+                        chat_id=uid,
+                        photo=media_url,
+                        caption=text or None,
+                        parse_mode=ParseMode.HTML if text else None,
+                        reply_markup=markup,
+                    )
+                elif media_type == "video" and media_url:
+                    await bot.send_video(
+                        chat_id=uid,
+                        video=media_url,
+                        caption=text or None,
+                        parse_mode=ParseMode.HTML if text else None,
+                        reply_markup=markup,
+                    )
+                elif text:
+                    await bot.send_message(
+                        chat_id=uid,
+                        text=text,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=markup,
+                    )
+            except Exception:
+                logger.warning("broadcast failed for user %s", uid, exc_info=True)
+
+    @web.post("/admin/broadcast")
+    async def admin_broadcast(
+        request: Request,
+        background_tasks: BackgroundTasks,
+        broadcast_text: str = Form(""),
+        broadcast_media_type: str = Form(""),
+        broadcast_media_url: str = Form(""),
+        broadcast_buttons_json: str = Form("[]"),
+    ):
+        if redirect := _auth(request):
+            return redirect
+        with db_connection() as conn:
+            user_rows = conn.execute("SELECT user_id FROM users").fetchall()
+        user_ids = [r["user_id"] for r in user_rows]
+        buttons_obj = parse_json(broadcast_buttons_json, [])
+        markup: InlineKeyboardMarkup | None = None
+        if isinstance(buttons_obj, list) and buttons_obj:
+            btns: list[list[InlineKeyboardButton]] = []
+            for item in buttons_obj:
+                if isinstance(item, dict) and item.get("text") and item.get("url"):
+                    btns.append([InlineKeyboardButton(str(item["text"]), url=str(item["url"]))])
+            if btns:
+                markup = InlineKeyboardMarkup(btns)
+        background_tasks.add_task(
+            _do_broadcast,
+            web.state.tg_application.bot,
+            user_ids,
+            broadcast_text,
+            broadcast_media_type.strip(),
+            broadcast_media_url.strip(),
+            markup,
+        )
+        safe_count = html.escape(str(len(user_ids)))
+        return HTMLResponse(
+            f"<html><body>广播任务已提交，将向 {safe_count} 位用户发送。<a href='/admin'>返回</a></body></html>"
+        )
 
     return web
 
