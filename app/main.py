@@ -689,8 +689,18 @@ def build_admin_html(settings_map: dict[str, str]) -> str:
     """
 
 
+async def ptb_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.error(
+        "handler exception for update %r: %s",
+        update,
+        context.error,
+        exc_info=context.error,
+    )
+
+
 def create_bot_application(token: str) -> Application:
     app = Application.builder().token(token).build()
+    app.add_error_handler(ptb_error_handler)
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("admin", admin_cmd))
     app.add_handler(CommandHandler("pending", pending_cmd))
@@ -746,7 +756,14 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
             update.effective_user.id if update.effective_user else None,
             update.effective_chat.id if update.effective_chat else None,
         )
-        await application.process_update(update)
+        try:
+            await application.process_update(update)
+        except Exception:
+            logger.exception(
+                "unhandled exception in process_update for update_id=%s",
+                update.update_id,
+            )
+            raise
         return JSONResponse({"ok": True})
 
     @web.get("/healthz")
