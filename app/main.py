@@ -4,9 +4,11 @@ import json
 import logging
 import os
 import sqlite3
+from asyncio import iscoroutine
+from contextlib import asynccontextmanager
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -174,6 +176,10 @@ def parse_json(raw: str, fallback: Any) -> Any:
         return fallback
 
 
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 def keyboard_config() -> list[dict[str, str]]:
     items = parse_json(setting_get("keyboard_buttons_json"), [])
     normalized: list[dict[str, str]] = []
@@ -295,17 +301,28 @@ async def send_start_content(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.effective_chat.send_message("快捷入口：", reply_markup=inline_markup)
 
 
+def build_channel_link(channel: str) -> str | None:
+    value = channel.strip()
+    if not value:
+        return None
+    if value.startswith("@"):
+        return f"https://t.me/{value[1:]}"
+    if value.startswith("https://t.me/"):
+        return value
+    if value.isdigit() or value.startswith("-100"):
+        return None
+    return f"https://t.me/{value}"
+
+
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     channel = setting_get("force_sub_channel", "").strip()
     if channel and not await is_subscribed(context.bot, user_id):
-        channel_link = f"https://t.me/{channel[1:]}" if channel.startswith("@") else f"https://t.me/{channel}"
-        markup = InlineKeyboardMarkup(
-            [
-                [InlineKeyboardButton("先去订阅", url=channel_link)],
-                [InlineKeyboardButton("我已订阅，重新检测", callback_data="retry_sub")],
-            ]
-        )
+        rows = [[InlineKeyboardButton("我已订阅，重新检测", callback_data="retry_sub")]]
+        channel_link = build_channel_link(channel)
+        if channel_link:
+            rows.insert(0, [InlineKeyboardButton("先去订阅", url=channel_link)])
+        markup = InlineKeyboardMarkup(rows)
         await update.effective_chat.send_message("请先订阅频道后再使用机器人。", reply_markup=markup)
         return
     await send_start_content(update, context)
@@ -447,7 +464,7 @@ async def submit_report(context: ContextTypes.DEFAULT_TYPE, update: Update) -> N
                 username,
                 tag,
                 json.dumps(values, ensure_ascii=False),
-                datetime.utcnow().isoformat(),
+                utc_now_iso(),
             ),
         )
         report_id = cur.lastrowid
@@ -492,7 +509,7 @@ async def approve_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         conn.execute(
             "UPDATE reports SET status='approved', reviewed_at=? WHERE id = ?",
-            (datetime.utcnow().isoformat(), report_id),
+            (utc_now_iso(), report_id),
         )
     await update.message.reply_text(f"报告 #{report_id} 已通过。")
 
@@ -530,7 +547,7 @@ async def reject_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             return
         conn.execute(
             "UPDATE reports SET status='rejected', review_feedback=?, reviewed_at=? WHERE id = ?",
-            (reason, datetime.utcnow().isoformat(), report_id),
+            (reason, utc_now_iso(), report_id),
         )
     tpl = setting_get("review_rejected_template", DEFAULT_SETTINGS["review_rejected_template"])
     feedback = tpl.format(id=report_id, reason=reason)
@@ -639,11 +656,8 @@ def create_bot_application(token: str) -> Application:
 
 
 def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
-    web = FastAPI(title="baogao-telegram-bot")
-    web.state.tg_application = application
-
-    @web.on_event("startup")
-    async def startup() -> None:
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
         await application.initialize()
         await application.start()
         if config.mode == "webhook":
@@ -652,13 +666,18 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
             webhook_target = f"{config.webhook_url.rstrip('/')}{config.webhook_path}"
             await application.bot.set_webhook(webhook_target)
             logger.info("webhook set to %s", webhook_target)
+        try:
+            yield
+        finally:
+            if config.mode == "webhook":
+                result = application.bot.delete_webhook()
+                if iscoroutine(result):
+                    await result
+            await application.stop()
+            await application.shutdown()
 
-    @web.on_event("shutdown")
-    async def shutdown() -> None:
-        if config.mode == "webhook":
-            await application.bot.delete_webhook()
-        await application.stop()
-        await application.shutdown()
+    web = FastAPI(title="baogao-telegram-bot", lifespan=lifespan)
+    web.state.tg_application = application
 
     @web.post(config.webhook_path)
     async def telegram_webhook(request: Request):
