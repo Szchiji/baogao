@@ -20,7 +20,7 @@ baogao/
 
 - **后端**：Python 3.11+, FastAPI, SQLAlchemy 2.0 (async), Alembic, aiogram 3.x, Jinja2
 - **数据库**：PostgreSQL（通过 `DATABASE_URL` 配置，兼容 Railway）
-- **部署**：Railway（start command: `alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT`）
+- **部署**：Railway（已在仓库 `railpack.json` 固化 start command）
 
 ## Railway 快速部署
 
@@ -32,5 +32,5 @@ baogao/
    - `BOT_MODE`：`webhook`（生产）或 `polling`（开发）
    - `WEBHOOK_URL`：Railway 应用 URL（webhook 模式时需要）
    - `JWT_SECRET`：随机字符串（请修改默认值！）
-4. 设置 Start Command：`alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+4. 启动命令已在仓库根目录 `railpack.json` 固化，无需在 UI 重复设置
 5. 可选：部署后运行 `python scripts/seed_template.py` 初始化示例模板

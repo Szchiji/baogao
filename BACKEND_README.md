@@ -74,11 +74,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 1. 在 Railway 创建项目，添加 **PostgreSQL** 插件
 2. 设置环境变量（参考上表）
 3. 设置 `BOT_MODE=webhook`，`WEBHOOK_URL=https://your-app.up.railway.app`
-4. 设置启动命令：
-
-```
-alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT
-```
+4. 启动命令已在仓库根目录 `railpack.json` 固化（`deploy.startCommand`），无需在 UI 重复设置
 
 ### BOT_MODE 说明
 
