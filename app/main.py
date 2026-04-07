@@ -253,8 +253,38 @@ def report_template() -> dict[str, Any]:
     valid_fields = []
     for field in fields:
         if isinstance(field, dict) and field.get("key") and field.get("label"):
-            valid_fields.append({"key": str(field["key"]), "label": str(field["label"])})
+            valid_fields.append({
+                "key": str(field["key"]),
+                "label": str(field["label"]),
+                "hint": str(field.get("hint", "")),
+                "required": bool(field.get("required", True)),
+                "type": str(field.get("type", "text")),
+            })
     return {"name": str(data.get("name", "模板")), "fields": valid_fields}
+
+
+def _make_field_prompt(field: dict[str, Any], sequential: bool = True) -> tuple[str, "InlineKeyboardMarkup | None"]:
+    """Return (prompt_text, optional_skip_markup) for prompting a field value."""
+    label = field["label"]
+    hint = field.get("hint", "")
+    field_type = field.get("type", "text")
+    required = field.get("required", True)
+
+    if field_type == "photo":
+        prompt = f"请发送「{label}」的图片"
+    else:
+        prompt = f"请输入「{label}」"
+
+    if hint:
+        prompt += f"\n\n💡 {hint}"
+
+    markup = None
+    if not required and sequential:
+        prompt += "\n\n（此项为可选，可跳过不填）"
+        markup = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⏭ 跳过此项", callback_data=f"skip_field:{field['key']}")]]
+        )
+    return prompt, markup
 
 
 async def is_subscribed(bot: Bot, user_id: int) -> bool:
@@ -333,8 +363,12 @@ def render_report_preview(values: dict[str, str], template: dict[str, Any]) -> s
     for field in template["fields"]:
         key = field["key"]
         label = html.escape(str(field["label"]))
+        field_type = field.get("type", "text")
         raw_value = values.get(key, "")
-        value = html.escape(raw_value) if raw_value else "<i>（未填写）</i>"
+        if raw_value:
+            value = "📷（已上传图片）" if field_type == "photo" else html.escape(raw_value)
+        else:
+            value = "<i>（未填写）</i>"
         lines.append(f"<b>{label}</b>：{value}")
     return "\n".join(lines)
 
@@ -343,8 +377,15 @@ def report_fill_keyboard(values: dict[str, str], template: dict[str, Any]) -> In
     buttons = []
     for field in template["fields"]:
         key = field["key"]
-        done = "✅ " if values.get(key) else ""
-        buttons.append([InlineKeyboardButton(f"{done}填写 {field['label']}", callback_data=f"fill:{key}")])
+        field_type = field.get("type", "text")
+        has_value = bool(values.get(key, ""))
+        done = "✅ " if has_value else ""
+        label = field["label"]
+        if field_type == "photo":
+            label += " 📷"
+        if not field.get("required", True):
+            label += "（可选）"
+        buttons.append([InlineKeyboardButton(f"{done}填写 {label}", callback_data=f"fill:{key}")])
     buttons.append([InlineKeyboardButton("提交审核", callback_data="submit_report")])
     return InlineKeyboardMarkup(buttons)
 
@@ -470,8 +511,10 @@ async def write_report_flow(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     first_field = fields[0]
     draft["awaiting"] = first_field["key"]
     draft["sequential"] = True
+    prompt, markup = _make_field_prompt(first_field, sequential=True)
     await update.message.reply_text(
-        f"📝 开始填写《{draft['template']['name']}》\n\n请输入{first_field['label']}："
+        f"📝 开始填写《{draft['template']['name']}》\n\n{prompt}",
+        reply_markup=markup,
     )
 
 
@@ -570,6 +613,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     draft = context.user_data.get("report_draft")
     if draft and draft.get("awaiting"):
         key = draft["awaiting"]
+        field_def = next((f for f in draft["template"]["fields"] if f["key"] == key), {})
+        if field_def.get("type", "text") == "photo":
+            await update.message.reply_text(
+                f"请发送图片（不是文字），作为「{field_def['label']}」字段。"
+            )
+            return
         draft["values"][key] = text
         draft["awaiting"] = ""
         sequential = draft.pop("sequential", False)
@@ -582,7 +631,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 next_field = fields[next_idx]
                 draft["awaiting"] = next_field["key"]
                 draft["sequential"] = True
-                await update.message.reply_text(f"请输入{next_field['label']}：")
+                prompt, markup = _make_field_prompt(next_field, sequential=True)
+                await update.message.reply_text(prompt, reply_markup=markup)
                 return
 
         await update.message.reply_text(
@@ -626,7 +676,7 @@ async def submit_report(context: ContextTypes.DEFAULT_TYPE, update: Update) -> N
     if not draft:
         await update.effective_chat.send_message("请先点击“写报告”。")
         return
-    required_fields = [f["key"] for f in draft["template"]["fields"]]
+    required_fields = [f["key"] for f in draft["template"]["fields"] if f.get("required", True)]
     missing = [k for k in required_fields if not draft["values"].get(k, "").strip()]
     if missing:
         await update.effective_chat.send_message("仍有未填写项，请继续完善。")
@@ -694,7 +744,17 @@ async def _push_report_to_channel(bot: Bot, report_id: int, report: sqlite3.Row)
     data_values = parse_json(report["data_json"], {})
     link_base = setting_get("report_link_base", "").strip()
     link = f"{link_base.rstrip('/')}/reports/{report_id}" if link_base else ""
-    detail = "\n".join([f"{k}: {v}" for k, v in data_values.items()])
+    # Build detail text: only text fields (not photo fields), using labels
+    tpl_fields = report_template()["fields"]
+    field_labels = {f["key"]: f["label"] for f in tpl_fields}
+    field_types = {f["key"]: f.get("type", "text") for f in tpl_fields}
+    detail_parts = []
+    for k, v in data_values.items():
+        if field_types.get(k, "text") == "photo":
+            continue
+        label = field_labels.get(k, k)
+        detail_parts.append(f"{label}: {v}")
+    detail = "\n".join(detail_parts)
     push_tpl = setting_get("push_template", DEFAULT_SETTINGS["push_template"])
     push_text = safe_format(
         push_tpl,
@@ -709,7 +769,7 @@ async def _push_report_to_channel(bot: Bot, report_id: int, report: sqlite3.Row)
         logger.warning("failed to push report %s to channel", report_id, exc_info=True)
 
 
-
+async def pending_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_user_admin(update.effective_user.id):
         await update.message.reply_text("无权限。")
         return
@@ -815,7 +875,32 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         draft["awaiting"] = key
         draft["sequential"] = False
-        await query.message.reply_text(f"请输入{field['label']}：")
+        prompt, _ = _make_field_prompt(field, sequential=False)
+        await query.message.reply_text(prompt)
+        return
+
+    if data.startswith("skip_field:"):
+        await query.answer()
+        key = data.split(":", 1)[1]
+        if not draft or draft.get("awaiting") != key:
+            return
+        draft["values"][key] = ""
+        draft["awaiting"] = ""
+        fields = draft["template"]["fields"]
+        current_idx = next((i for i, f in enumerate(fields) if f["key"] == key), -1)
+        next_idx = current_idx + 1
+        if next_idx < len(fields):
+            next_field = fields[next_idx]
+            draft["awaiting"] = next_field["key"]
+            draft["sequential"] = True
+            prompt, markup = _make_field_prompt(next_field, sequential=True)
+            await query.message.reply_text(prompt, reply_markup=markup)
+        else:
+            await query.message.reply_text(
+                render_report_preview(draft["values"], draft["template"]),
+                parse_mode=ParseMode.HTML,
+                reply_markup=report_fill_keyboard(draft["values"], draft["template"]),
+            )
         return
 
     if data == "submit_report":
@@ -938,6 +1023,8 @@ textarea{resize:vertical;min-height:70px}
 .table td input{padding:5px 8px;border:1px solid #cbd5e1;border-radius:5px;font-size:.85rem;width:150px}
 .muted{color:#94a3b8;font-style:italic}
 .badge{display:inline-flex;align-items:center;justify-content:center;background:#ef4444;color:#fff;border-radius:10px;font-size:.7rem;font-weight:700;min-width:18px;height:18px;padding:0 5px;margin-left:4px;vertical-align:middle}
+.tpl-field-card{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;margin-bottom:10px;overflow:hidden}
+.tpl-field-card .editor-row{background:transparent;border:none;border-radius:0;margin-bottom:0}
 @media(max-width:600px){.field-row{grid-template-columns:1fr}}
 """
 
@@ -1055,29 +1142,55 @@ _ADMIN_JS = """
   var tplNameIn=document.getElementById('template-name');
   tplNameIn.value=tplData.name||'';
   function makeTplRow(field){
-    var row=document.createElement('div'); row.className='editor-row';
+    var card=document.createElement('div'); card.className='tpl-field-card';
+    // Row 1: key, label, type, required, remove
+    var row1=document.createElement('div'); row1.className='editor-row'; row1.style.marginBottom='4px';
     var keyIn=document.createElement('input');
     keyIn.type='text'; keyIn.placeholder='英文标识（如 title）'; keyIn.value=field.key||'';
-    keyIn.dataset.field='key';
+    keyIn.dataset.field='key'; keyIn.style.flex='1';
     var labelIn=document.createElement('input');
     labelIn.type='text'; labelIn.placeholder='显示名称（如 标题）'; labelIn.value=field.label||'';
-    labelIn.dataset.field='label';
+    labelIn.dataset.field='label'; labelIn.style.flex='1';
+    var typeSel=document.createElement('select');
+    typeSel.dataset.field='type'; typeSel.style.flex='none'; typeSel.style.width='80px';
+    [{value:'text',label:'文本'},{value:'photo',label:'图片'}].forEach(function(o){
+      var opt=document.createElement('option');
+      opt.value=o.value; opt.textContent=o.label;
+      if((field.type||'text')===o.value) opt.selected=true;
+      typeSel.appendChild(opt);
+    });
+    var reqLabel=document.createElement('label');
+    reqLabel.style.cssText='display:flex;align-items:center;gap:4px;font-weight:normal;font-size:.85rem;white-space:nowrap;flex:none;text-transform:none;letter-spacing:0;color:#475569;';
+    var reqCheck=document.createElement('input');
+    reqCheck.type='checkbox'; reqCheck.dataset.field='required'; reqCheck.style.margin='0';
+    reqCheck.checked=(field.required!==false);
+    reqLabel.appendChild(reqCheck); reqLabel.appendChild(document.createTextNode('必填'));
     var rm=document.createElement('button');
     rm.type='button'; rm.textContent='✕'; rm.className='btn btn-danger btn-sm';
-    rm.addEventListener('click',function(){row.remove();});
-    row.appendChild(keyIn); row.appendChild(labelIn); row.appendChild(rm);
-    return row;
+    rm.addEventListener('click',function(){card.remove();});
+    row1.appendChild(keyIn); row1.appendChild(labelIn); row1.appendChild(typeSel); row1.appendChild(reqLabel); row1.appendChild(rm);
+    // Row 2: hint input
+    var row2=document.createElement('div'); row2.style.cssText='padding:0 12px 10px;';
+    var hintIn=document.createElement('input');
+    hintIn.type='text'; hintIn.placeholder='字段说明（选填）：例如"请填写今日工作摘要"，显示给用户作为填写提示';
+    hintIn.value=field.hint||''; hintIn.dataset.field='hint'; hintIn.style.width='100%';
+    row2.appendChild(hintIn);
+    card.appendChild(row1); card.appendChild(row2);
+    return card;
   }
   (tplData.fields||[]).forEach(function(f){tplFieldsEl.appendChild(makeTplRow(f));});
   document.getElementById('template-add').addEventListener('click',function(){
-    tplFieldsEl.appendChild(makeTplRow({key:'',label:''}));
+    tplFieldsEl.appendChild(makeTplRow({key:'',label:'',hint:'',required:true,type:'text'}));
   });
   function serializeTemplate(){
     var fields=[];
-    tplFieldsEl.querySelectorAll('.editor-row').forEach(function(row){
-      var key=row.querySelector('[data-field=key]').value.trim();
-      var label=row.querySelector('[data-field=label]').value.trim();
-      if(key&&label) fields.push({key:key,label:label});
+    tplFieldsEl.querySelectorAll('.tpl-field-card').forEach(function(card){
+      var key=card.querySelector('[data-field=key]').value.trim();
+      var label=card.querySelector('[data-field=label]').value.trim();
+      var hint=card.querySelector('[data-field=hint]').value.trim();
+      var type=card.querySelector('[data-field=type]').value;
+      var required=card.querySelector('[data-field=required]').checked;
+      if(key&&label) fields.push({key:key,label:label,hint:hint,required:required,type:type});
     });
     var tpl={name:tplNameIn.value.trim()||'模板',fields:fields};
     document.getElementById('report_template_json').value=JSON.stringify(tpl);
@@ -1289,7 +1402,7 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
   </div>
   <div class="field">
     <label>模板字段</label>
-    <div class="hint" style="margin-bottom:10px">字段标识用英文（作为数据键名），字段名称用中文（显示给用户）</div>
+    <div class="hint" style="margin-bottom:10px">每个字段可设置：英文标识（键名）、显示名称、类型（文本/图片）、是否必填、字段说明（提示用户如何填写）</div>
     <div id="template-fields"></div>
     <button type="button" class="btn-add" id="template-add">＋ 添加字段</button>
   </div>
@@ -1386,6 +1499,60 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
 """
 
 
+async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.message.photo:
+        return
+
+    user = update.effective_user
+    upsert_user(user.id, user.username)
+
+    channel = setting_get("force_sub_channel", "").strip()
+    if channel and not await is_subscribed(context.bot, user.id):
+        rows = [[InlineKeyboardButton("我已订阅，重新检测", callback_data="retry_sub")]]
+        channel_link = build_channel_link(channel)
+        if channel_link:
+            rows.insert(0, [InlineKeyboardButton("先去订阅", url=channel_link)])
+        markup = InlineKeyboardMarkup(rows)
+        await update.message.reply_text("请先订阅频道后再使用机器人。", reply_markup=markup)
+        return
+
+    draft = context.user_data.get("report_draft")
+    if not draft or not draft.get("awaiting"):
+        await update.message.reply_text("未识别操作，请使用底部菜单。")
+        return
+
+    key = draft["awaiting"]
+    field_def = next((f for f in draft["template"]["fields"] if f["key"] == key), {})
+    if field_def.get("type", "text") != "photo":
+        await update.message.reply_text(
+            f"请输入文字（不是图片），作为「{field_def.get('label', key)}」字段。"
+        )
+        return
+
+    file_id = update.message.photo[-1].file_id
+    draft["values"][key] = file_id
+    draft["awaiting"] = ""
+    sequential = draft.pop("sequential", False)
+
+    if sequential:
+        fields = draft["template"]["fields"]
+        current_idx = next((i for i, f in enumerate(fields) if f["key"] == key), -1)
+        next_idx = current_idx + 1
+        if next_idx < len(fields):
+            next_field = fields[next_idx]
+            draft["awaiting"] = next_field["key"]
+            draft["sequential"] = True
+            prompt, markup = _make_field_prompt(next_field, sequential=True)
+            await update.message.reply_text(prompt, reply_markup=markup)
+            return
+
+    await update.message.reply_text(
+        render_report_preview(draft["values"], draft["template"]),
+        parse_mode=ParseMode.HTML,
+        reply_markup=report_fill_keyboard(draft["values"], draft["template"]),
+    )
+
+
 async def ptb_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error(
         "handler exception for update %r: %s",
@@ -1404,6 +1571,7 @@ def create_bot_application(token: str) -> Application:
     app.add_handler(CommandHandler("approve", approve_cmd))
     app.add_handler(CommandHandler("reject", reject_cmd))
     app.add_handler(CallbackQueryHandler(on_callback))
+    app.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, on_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     return app
 
