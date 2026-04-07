@@ -159,7 +159,7 @@ def init_db() -> None:
         # Migration: add channel_message_link column if it does not exist yet
         try:
             conn.execute("ALTER TABLE reports ADD COLUMN channel_message_link TEXT")
-        except Exception:
+        except sqlite3.OperationalError:
             pass  # column already exists
         conn.execute(
             """
@@ -767,6 +767,8 @@ def _build_channel_message_link(channel: str, message_id: int) -> str:
     if channel.startswith("@"):
         return f"https://t.me/{channel[1:]}/{message_id}"
     # Private/supergroup numeric IDs (e.g. -1001234567890 → t.me/c/1234567890/...)
+    # Telegram supergroup/channel IDs are prefixed with -100 in Bot API; the t.me/c/ path
+    # uses only the remaining digits (e.g. -1001234567890 → t.me/c/1234567890/...).
     raw = channel.lstrip("-")
     if raw.isdigit():
         if raw.startswith("100"):
