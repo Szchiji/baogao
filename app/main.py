@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import uvicorn
 from fastapi import FastAPI, Form, HTTPException, Request
@@ -237,17 +238,18 @@ def start_keyboard() -> ReplyKeyboardMarkup:
 
 def _is_admin_entry_button(text: str, url: str) -> bool:
     lowered_text = text.strip().lower()
-    lowered_url = url.strip().lower()
-    if "管理后台" in lowered_text:
+    if lowered_text in {"管理后台", "admin panel"}:
         return True
-    if "admin" in lowered_text:
+    parsed = urlparse(url.strip())
+    path = parsed.path.strip().lower()
+    if path == "/admin":
         return True
-    return "/admin" in lowered_url
+    return path.startswith("/admin/")
 
 
 def start_inline_buttons(user_id: int | None = None) -> InlineKeyboardMarkup | None:
     raw_buttons = parse_json(setting_get("start_buttons_json"), [])
-    is_admin = bool(user_id is not None and is_user_admin(user_id))
+    is_admin = user_id is not None and is_user_admin(user_id)
     buttons: list[list[InlineKeyboardButton]] = []
     for item in raw_buttons:
         if isinstance(item, dict) and item.get("text") and item.get("url"):
