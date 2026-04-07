@@ -268,11 +268,12 @@ def start_inline_buttons(user_id: int | None = None) -> InlineKeyboardMarkup | N
 
 
 def render_report_preview(values: dict[str, str], template: dict[str, Any]) -> str:
-    lines = [f"📝 <b>{template['name']}</b>", ""]
+    lines = [f"📝 <b>{html.escape(str(template['name']))}</b>", ""]
     for field in template["fields"]:
         key = field["key"]
-        label = field["label"]
-        value = values.get(key, "（未填写）")
+        label = html.escape(str(field["label"]))
+        raw_value = values.get(key, "")
+        value = html.escape(raw_value) if raw_value else "<i>（未填写）</i>"
         lines.append(f"<b>{label}</b>：{value}")
     return "\n".join(lines)
 
@@ -584,7 +585,7 @@ async def submit_report(context: ContextTypes.DEFAULT_TYPE, update: Update) -> N
     admin_ids = get_admin_user_ids()
     if admin_ids:
         preview = render_report_preview(values, template)
-        notification = f"📋 新报告待审核 #{report_id}\n用户：@{username or '未知'}\n\n{preview}"
+        notification = f"📋 新报告待审核 #{report_id}\n用户：@{html.escape(username or '未知')}\n\n{preview}"
         review_buttons = InlineKeyboardMarkup(
             [
                 [
