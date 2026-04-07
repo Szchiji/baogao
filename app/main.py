@@ -427,6 +427,12 @@ async def query_reports(text: str) -> str:
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.message.text:
+        logger.info(
+            "on_text skipped: has_message=%s has_text=%s update_id=%s",
+            bool(update.message),
+            bool(update.message and update.message.text),
+            update.update_id,
+        )
         return
     text = update.message.text.strip()
 
@@ -454,6 +460,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     mapping = {item["text"]: item for item in keyboard_config()}
     item = mapping.get(text)
     if not item:
+        logger.info(
+            "on_text unmatched keyboard action: text=%r user_id=%s chat_id=%s",
+            text,
+            update.effective_user.id if update.effective_user else None,
+            update.effective_chat.id if update.effective_chat else None,
+        )
         await update.message.reply_text("未识别操作，请使用底部菜单。")
         return
 
@@ -589,6 +601,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     query = update.callback_query
     await query.answer()
     data = query.data or ""
+    logger.info(
+        "on_callback received: data=%r user_id=%s chat_id=%s",
+        data,
+        update.effective_user.id if update.effective_user else None,
+        update.effective_chat.id if update.effective_chat else None,
+    )
     if data == "retry_sub":
         if await is_subscribed(context.bot, update.effective_user.id):
             await query.message.reply_text("订阅检测通过。")
@@ -716,6 +734,16 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
         update = Update.de_json(payload, application.bot)
         if not update:
             raise HTTPException(status_code=400, detail="invalid telegram update payload")
+        logger.info(
+            "webhook update received: update_id=%s has_message=%s has_callback=%s message_text=%r callback_data=%r user_id=%s chat_id=%s",
+            update.update_id,
+            bool(update.message),
+            bool(update.callback_query),
+            update.message.text if update.message else None,
+            update.callback_query.data if update.callback_query else None,
+            update.effective_user.id if update.effective_user else None,
+            update.effective_chat.id if update.effective_chat else None,
+        )
         await application.process_update(update)
         return JSONResponse({"ok": True})
 
