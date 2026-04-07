@@ -1347,7 +1347,7 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
   <form id="broadcast-form" method="post" action="/admin/broadcast">
     <div class="field">
       <label>广播文本</label>
-      <textarea name="broadcast_text" rows="5" placeholder="支持 HTML 格式：&lt;b&gt;加粗&lt;/b&gt;、&lt;i&gt;斜体&lt;/i&gt;、&lt;a href=&quot;...&quot;&gt;链接&lt;/a&gt;"></textarea>
+      <textarea name="broadcast_text" rows="5" placeholder="支持 HTML 格式：&lt;b&gt;加粗&lt;/b&gt;、&lt;i&gt;斜体&lt;/i&gt;、&lt;a href='...'&gt;链接&lt;/a&gt;"></textarea>
     </div>
     <div class="field-row">
       <div class="field">
