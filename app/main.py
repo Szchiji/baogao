@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 
 import uvicorn
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from telegram import (
     Bot,
     InlineKeyboardButton,
@@ -309,10 +309,12 @@ def is_user_admin(user_id: int) -> bool:
 
 
 def _normalize_admin_url(base_url: str) -> str:
-    """Return the /admin URL, avoiding a duplicate /admin suffix."""
+    """Return the /admin URL, stripping any existing admin sub-paths first."""
     base = base_url.rstrip("/")
-    if base.endswith("/admin"):
-        return base
+    for suffix in ("/admin/login", "/admin"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+            break
     return f"{base}/admin"
 
 
@@ -966,16 +968,16 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
             raise HTTPException(status_code=404, detail="report not found")
         return report_to_html(row)
 
-    def _auth(request: Request) -> None:
+    def _auth(request: Request) -> RedirectResponse | None:
         if not config.admin_panel_token:
-            return
+            return None
         cookie_token = request.cookies.get("admin_token", "")
         if cookie_token == config.admin_panel_token:
-            return
+            return None
         query_token = request.query_params.get("token", "")
         if query_token == config.admin_panel_token:
-            return
-        raise HTTPException(status_code=403, detail="forbidden")
+            return None
+        return RedirectResponse(url="/admin/login", status_code=303)
 
     def _should_set_admin_cookie(request: Request) -> bool:
         if not config.admin_panel_token:
@@ -1018,7 +1020,8 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
 
     @web.get("/admin", response_class=HTMLResponse)
     async def admin_page(request: Request):
-        _auth(request)
+        if redirect := _auth(request):
+            return redirect
         should_set_cookie = _should_set_admin_cookie(request)
         with db_connection() as conn:
             rows = conn.execute("SELECT key, value FROM settings").fetchall()
@@ -1056,7 +1059,8 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
         search_help_text: str = Form(""),
         report_link_base: str = Form(""),
     ):
-        _auth(request)
+        if redirect := _auth(request):
+            return redirect
         try:
             start_buttons_obj = json.loads(start_buttons_json)
             keyboard_buttons_obj = json.loads(keyboard_buttons_json)
@@ -1092,14 +1096,16 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
 
     @web.get("/admin/settings")
     async def admin_settings(request: Request):
-        _auth(request)
+        if redirect := _auth(request):
+            return redirect
         with db_connection() as conn:
             rows = conn.execute("SELECT key, value FROM settings").fetchall()
         return {r["key"]: r["value"] for r in rows}
 
     @web.post("/admin/approve/{report_id}")
     async def web_approve_report(report_id: int, request: Request):
-        _auth(request)
+        if redirect := _auth(request):
+            return redirect
         with db_connection() as conn:
             report = conn.execute("SELECT * FROM reports WHERE id = ?", (report_id,)).fetchone()
             if not report:
@@ -1132,7 +1138,8 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
 
     @web.post("/admin/reject/{report_id}")
     async def web_reject_report(report_id: int, request: Request, reason: str = Form(default="请联系管理员")):
-        _auth(request)
+        if redirect := _auth(request):
+            return redirect
         with db_connection() as conn:
             report = conn.execute("SELECT * FROM reports WHERE id = ?", (report_id,)).fetchone()
             if not report:
