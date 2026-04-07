@@ -266,8 +266,16 @@ def is_user_admin(user_id: int) -> bool:
     raw = os.getenv("ADMIN_USER_IDS", "")
     if not raw:
         return False
-    admin_ids = {x.strip() for x in raw.split(",") if x.strip()}
-    return str(user_id) in admin_ids
+    admin_ids: set[int] = set()
+    for value in raw.split(","):
+        item = value.strip()
+        if not item:
+            continue
+        try:
+            admin_ids.add(int(item))
+        except ValueError:
+            logger.warning("invalid ADMIN_USER_IDS entry ignored: %s", item)
+    return user_id in admin_ids
 
 
 async def send_start_content(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -686,6 +694,8 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
                 raise HTTPException(status_code=401, detail="invalid webhook secret")
         payload = await request.json()
         update = Update.de_json(payload, application.bot)
+        if not update:
+            raise HTTPException(status_code=400, detail="invalid telegram update payload")
         await application.process_update(update)
         return JSONResponse({"ok": True})
 
@@ -726,7 +736,10 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
         if request.url.scheme == "https":
             return True
         forwarded_proto = request.headers.get("x-forwarded-proto", "")
-        return forwarded_proto.lower() == "https"
+        if forwarded_proto.lower() == "https":
+            return True
+        forwarded_ssl = request.headers.get("x-forwarded-ssl", "")
+        return forwarded_ssl.lower() == "on"
 
     @web.get("/admin/login", response_class=HTMLResponse)
     async def admin_login():
@@ -793,6 +806,12 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
             report_template_obj = json.loads(report_template_json)
         except json.JSONDecodeError:
             raise HTTPException(status_code=400, detail="JSON 配置格式错误")
+        if not isinstance(start_buttons_obj, list):
+            raise HTTPException(status_code=400, detail="start_buttons_json 必须是数组")
+        if not isinstance(keyboard_buttons_obj, list):
+            raise HTTPException(status_code=400, detail="keyboard_buttons_json 必须是数组")
+        if not isinstance(report_template_obj, dict):
+            raise HTTPException(status_code=400, detail="report_template_json 必须是对象")
 
         updates = {
             "force_sub_channel": force_sub_channel.strip(),
