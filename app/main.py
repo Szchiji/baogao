@@ -39,6 +39,8 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger("report-bot")
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 DB_PATH = Path(os.getenv("DB_PATH", "baogao.db"))
