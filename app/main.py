@@ -259,8 +259,7 @@ def start_inline_buttons(user_id: int | None = None) -> InlineKeyboardMarkup | N
             if _is_admin_entry_button(text, url):
                 if not is_admin:
                     continue
-                if admin_panel_url:
-                    url = f"{admin_panel_url.rstrip('/')}/admin"
+                url = f"{admin_panel_url.rstrip('/')}/admin" if admin_panel_url else url
             buttons.append([InlineKeyboardButton(text, url=url)])
     return InlineKeyboardMarkup(buttons) if buttons else None
 
