@@ -151,6 +151,9 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status, id DESC)"
+        )
         for key, value in DEFAULT_SETTINGS.items():
             conn.execute(
                 "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (key, value)
@@ -257,19 +260,20 @@ def start_inline_buttons(user_id: int | None = None) -> InlineKeyboardMarkup | N
             text = str(item["text"])
             url = str(item["url"])
             if _is_admin_entry_button(text, url):
-                if not is_admin:
+                if not is_admin or not admin_panel_url:
                     continue
-                url = f"{admin_panel_url.rstrip('/')}/admin" if admin_panel_url else url
+                url = _normalize_admin_url(admin_panel_url)
             buttons.append([InlineKeyboardButton(text, url=url)])
     return InlineKeyboardMarkup(buttons) if buttons else None
 
 
 def render_report_preview(values: dict[str, str], template: dict[str, Any]) -> str:
-    lines = [f"📝 <b>{template['name']}</b>", ""]
+    lines = [f"📝 <b>{html.escape(str(template['name']))}</b>", ""]
     for field in template["fields"]:
         key = field["key"]
-        label = field["label"]
-        value = values.get(key, "（未填写）")
+        label = html.escape(str(field["label"]))
+        raw_value = values.get(key, "")
+        value = html.escape(raw_value) if raw_value else "<i>（未填写）</i>"
         lines.append(f"<b>{label}</b>：{value}")
     return "\n".join(lines)
 
@@ -284,20 +288,32 @@ def report_fill_keyboard(values: dict[str, str], template: dict[str, Any]) -> In
     return InlineKeyboardMarkup(buttons)
 
 
-def is_user_admin(user_id: int) -> bool:
+def get_admin_user_ids() -> list[int]:
     raw = os.getenv("ADMIN_USER_IDS", "")
     if not raw:
-        return False
-    admin_ids: set[int] = set()
+        return []
+    ids: list[int] = []
     for value in raw.split(","):
         item = value.strip()
         if not item:
             continue
         try:
-            admin_ids.add(int(item))
+            ids.append(int(item))
         except ValueError:
             logger.warning("invalid ADMIN_USER_IDS entry ignored: %s", item)
-    return user_id in admin_ids
+    return ids
+
+
+def is_user_admin(user_id: int) -> bool:
+    return user_id in get_admin_user_ids()
+
+
+def _normalize_admin_url(base_url: str) -> str:
+    """Return the /admin URL, avoiding a duplicate /admin suffix."""
+    base = base_url.rstrip("/")
+    if base.endswith("/admin"):
+        return base
+    return f"{base}/admin"
 
 
 async def send_start_content(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -367,7 +383,7 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not base_url:
         await update.message.reply_text("未配置 ADMIN_PANEL_URL。")
         return
-    url = f"{base_url.rstrip('/')}/admin"
+    url = _normalize_admin_url(base_url)
     button = InlineKeyboardMarkup(
         [[InlineKeyboardButton("打开管理后台", web_app=WebAppInfo(url=url))]]
     )
@@ -383,10 +399,15 @@ def start_report_draft(context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
 
 async def write_report_flow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     draft = start_report_draft(context)
+    fields = draft["template"]["fields"]
+    if not fields:
+        await update.message.reply_text("报告模板无字段，请联系管理员配置。")
+        return
+    first_field = fields[0]
+    draft["awaiting"] = first_field["key"]
+    draft["sequential"] = True
     await update.message.reply_text(
-        render_report_preview(draft["values"], draft["template"]),
-        parse_mode=ParseMode.HTML,
-        reply_markup=report_fill_keyboard(draft["values"], draft["template"]),
+        f"📝 开始填写《{draft['template']['name']}》\n\n请输入{first_field['label']}："
     )
 
 
@@ -446,11 +467,52 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("请先完成频道订阅后再使用。")
         return
 
+    # Admin reject-reason flow: only when admin is NOT mid-draft to avoid ambiguity
+    pending_reject_id = context.user_data.get("pending_reject_id")
+    active_draft = context.user_data.get("report_draft")
+    if (
+        pending_reject_id is not None
+        and is_user_admin(update.effective_user.id)
+        and not (active_draft and active_draft.get("awaiting"))
+    ):
+        context.user_data.pop("pending_reject_id", None)
+        reason = text
+        with db_connection() as conn:
+            report = conn.execute("SELECT * FROM reports WHERE id = ?", (pending_reject_id,)).fetchone()
+            if not report:
+                await update.message.reply_text("报告不存在。")
+                return
+            if report["status"] != "pending":
+                await update.message.reply_text(f"报告已处于 {report['status']} 状态，无法驳回。")
+                return
+            conn.execute(
+                "UPDATE reports SET status='rejected', review_feedback=?, reviewed_at=? WHERE id = ?",
+                (reason, utc_now_iso(), pending_reject_id),
+            )
+        tpl = setting_get("review_rejected_template", DEFAULT_SETTINGS["review_rejected_template"])
+        feedback = tpl.format(id=pending_reject_id, reason=reason)
+        await context.bot.send_message(chat_id=report["user_id"], text=feedback)
+        await update.message.reply_text(f"报告 #{pending_reject_id} 已驳回。")
+        return
+
     draft = context.user_data.get("report_draft")
     if draft and draft.get("awaiting"):
         key = draft["awaiting"]
         draft["values"][key] = text
         draft["awaiting"] = ""
+        sequential = draft.pop("sequential", False)
+
+        if sequential:
+            fields = draft["template"]["fields"]
+            current_idx = next((i for i, f in enumerate(fields) if f["key"] == key), -1)
+            next_idx = current_idx + 1
+            if next_idx < len(fields):
+                next_field = fields[next_idx]
+                draft["awaiting"] = next_field["key"]
+                draft["sequential"] = True
+                await update.message.reply_text(f"请输入{next_field['label']}：")
+                return
+
         await update.message.reply_text(
             render_report_preview(draft["values"], draft["template"]),
             parse_mode=ParseMode.HTML,
@@ -500,6 +562,7 @@ async def submit_report(context: ContextTypes.DEFAULT_TYPE, update: Update) -> N
     values = draft["values"]
     tag = values.get("tag", "")
     username = update.effective_user.username or ""
+    template = draft["template"]
     with db_connection() as conn:
         cur = conn.execute(
             """
@@ -517,6 +580,32 @@ async def submit_report(context: ContextTypes.DEFAULT_TYPE, update: Update) -> N
         report_id = cur.lastrowid
     context.user_data.pop("report_draft", None)
     await update.effective_chat.send_message(f"✅ 报告 #{report_id} 已提交，等待审核。")
+
+    # Notify all admins with inline approve/reject buttons
+    admin_ids = get_admin_user_ids()
+    if admin_ids:
+        preview = render_report_preview(values, template)
+        notification = f"📋 新报告待审核 #{report_id}\n用户：@{html.escape(username or '未知')}\n\n{preview}"
+        review_buttons = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("✅ 通过", callback_data=f"approve:{report_id}"),
+                    InlineKeyboardButton("❌ 驳回", callback_data=f"reject:{report_id}"),
+                ]
+            ]
+        )
+        for admin_id in admin_ids:
+            try:
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text=notification,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=review_buttons,
+                )
+            except Exception:
+                logger.warning(
+                    "failed to notify admin %s about report %s", admin_id, report_id, exc_info=True
+                )
 
 
 async def pending_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -604,7 +693,6 @@ async def reject_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    await query.answer()
     data = query.data or ""
     logger.info(
         "on_callback received: data=%r user_id=%s chat_id=%s",
@@ -613,6 +701,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         update.effective_chat.id if update.effective_chat else None,
     )
     if data == "retry_sub":
+        await query.answer()
         if await is_subscribed(context.bot, update.effective_user.id):
             await query.message.reply_text("订阅检测通过。")
             await send_start_content(update, context)
@@ -622,6 +711,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     draft = context.user_data.get("report_draft")
     if data.startswith("fill:"):
+        await query.answer()
         if not draft:
             draft = start_report_draft(context)
         key = data.split(":", 1)[1]
@@ -631,11 +721,79 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await query.message.reply_text("字段不存在。")
             return
         draft["awaiting"] = key
-        await query.message.reply_text(f"请输入：{field['label']}")
+        draft["sequential"] = False
+        await query.message.reply_text(f"请输入{field['label']}：")
         return
 
     if data == "submit_report":
+        await query.answer()
         await submit_report(context, update)
+        return
+
+    if data.startswith("approve:"):
+        if not is_user_admin(update.effective_user.id):
+            await query.answer("无权限。", show_alert=True)
+            return
+        try:
+            report_id = int(data.split(":", 1)[1])
+        except ValueError:
+            await query.answer("无效的报告ID。", show_alert=True)
+            return
+        with db_connection() as conn:
+            report = conn.execute("SELECT * FROM reports WHERE id = ?", (report_id,)).fetchone()
+            if not report:
+                await query.answer("报告不存在。", show_alert=True)
+                return
+            if report["status"] != "pending":
+                await query.answer(f"报告已处于 {report['status']} 状态。", show_alert=True)
+                return
+            conn.execute(
+                "UPDATE reports SET status='approved', reviewed_at=? WHERE id = ?",
+                (utc_now_iso(), report_id),
+            )
+        await query.answer("已通过。")
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await query.message.reply_text(f"✅ 报告 #{report_id} 已通过审核。")
+        approved_tpl = setting_get("review_approved_template", DEFAULT_SETTINGS["review_approved_template"])
+        feedback = approved_tpl.format(id=report_id)
+        await context.bot.send_message(chat_id=report["user_id"], text=feedback)
+        push_channel = setting_get("push_channel", "").strip()
+        if push_channel:
+            data_values = parse_json(report["data_json"], {})
+            detail = "\n".join([f"{k}: {v}" for k, v in data_values.items()])
+            await context.bot.send_message(
+                chat_id=push_channel,
+                text=f"📢 审核通过报告 #{report_id}\n@{report['username'] or 'unknown'}\n{detail}",
+            )
+        return
+
+    if data.startswith("reject:"):
+        if not is_user_admin(update.effective_user.id):
+            await query.answer("无权限。", show_alert=True)
+            return
+        try:
+            report_id = int(data.split(":", 1)[1])
+        except ValueError:
+            await query.answer("无效的报告ID。", show_alert=True)
+            return
+        with db_connection() as conn:
+            report = conn.execute("SELECT * FROM reports WHERE id = ?", (report_id,)).fetchone()
+        if not report:
+            await query.answer("报告不存在。", show_alert=True)
+            return
+        if report["status"] != "pending":
+            await query.answer(f"报告已处于 {report['status']} 状态。", show_alert=True)
+            return
+        context.user_data["pending_reject_id"] = report_id
+        await query.answer()
+        await query.message.reply_text(f"请输入驳回报告 #{report_id} 的原因：")
+        return
+
+    # Fallback: answer unhandled callback queries to avoid Telegram timeout errors
+    await query.answer()
 
 
 def report_to_html(report_row: sqlite3.Row) -> str:
@@ -650,9 +808,35 @@ def report_to_html(report_row: sqlite3.Row) -> str:
     return "\n".join(lines)
 
 
-def build_admin_html(settings_map: dict[str, str]) -> str:
+def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] | None = None) -> str:
     def e(key: str) -> str:
         return html.escape(settings_map.get(key, ""))
+
+    if pending_reports:
+        rows_html = "".join(
+            f"<tr>"
+            f"<td>#{r['id']}</td>"
+            f"<td>@{html.escape(r['username'] or 'unknown')}</td>"
+            f"<td>{html.escape(r['created_at'])}</td>"
+            f"<td>"
+            f"<form method='post' action='/admin/approve/{r['id']}' style='display:inline'>"
+            f"<button type='submit'>✅ 通过</button></form> "
+            f"<form method='post' action='/admin/reject/{r['id']}' style='display:inline'>"
+            f"<input name='reason' placeholder='驳回原因' required style='width:160px'>"
+            f"<button type='submit'>❌ 驳回</button></form>"
+            f"</td>"
+            f"</tr>"
+            for r in pending_reports
+        )
+        pending_section = (
+            "<hr><h3>待审核报告（" + str(len(pending_reports)) + "）</h3>"
+            "<table border='1' cellpadding='6' style='border-collapse:collapse;width:100%'>"
+            "<tr><th>ID</th><th>用户</th><th>提交时间</th><th>操作</th></tr>"
+            + rows_html
+            + "</table>"
+        )
+    else:
+        pending_section = "<hr><p>暂无待审核报告。</p>"
 
     return f"""
     <html><body style="font-family: sans-serif; max-width: 900px; margin: 24px auto;">
@@ -688,6 +872,7 @@ def build_admin_html(settings_map: dict[str, str]) -> str:
       <input name="report_link_base" value="{e('report_link_base')}" style="width:100%"><br><br>
       <button type="submit">保存配置</button>
     </form>
+    {pending_section}
     </body></html>
     """
 
@@ -837,8 +1022,12 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
         should_set_cookie = _should_set_admin_cookie(request)
         with db_connection() as conn:
             rows = conn.execute("SELECT key, value FROM settings").fetchall()
+            pending_rows = conn.execute(
+                "SELECT id, username, created_at FROM reports WHERE status = 'pending' ORDER BY id DESC LIMIT 50"
+            ).fetchall()
         settings_map = {r["key"]: r["value"] for r in rows}
-        response = HTMLResponse(build_admin_html(settings_map))
+        pending_list = [dict(r) for r in pending_rows]
+        response = HTMLResponse(build_admin_html(settings_map, pending_list))
         if should_set_cookie:
             response.set_cookie(
                 key="admin_token",
@@ -907,6 +1096,61 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
         with db_connection() as conn:
             rows = conn.execute("SELECT key, value FROM settings").fetchall()
         return {r["key"]: r["value"] for r in rows}
+
+    @web.post("/admin/approve/{report_id}")
+    async def web_approve_report(report_id: int, request: Request):
+        _auth(request)
+        with db_connection() as conn:
+            report = conn.execute("SELECT * FROM reports WHERE id = ?", (report_id,)).fetchone()
+            if not report:
+                raise HTTPException(status_code=404, detail="报告不存在")
+            if report["status"] != "pending":
+                raise HTTPException(status_code=400, detail=f"报告已处于 {report['status']} 状态")
+            conn.execute(
+                "UPDATE reports SET status='approved', reviewed_at=? WHERE id = ?",
+                (utc_now_iso(), report_id),
+            )
+        approved_tpl = setting_get("review_approved_template", DEFAULT_SETTINGS["review_approved_template"])
+        feedback = approved_tpl.format(id=report_id)
+        try:
+            await web.state.tg_application.bot.send_message(chat_id=report["user_id"], text=feedback)
+        except Exception:
+            logger.warning("failed to notify user %s of approval", report["user_id"], exc_info=True)
+        push_channel = setting_get("push_channel", "").strip()
+        if push_channel:
+            data_values = parse_json(report["data_json"], {})
+            detail = "\n".join([f"{k}: {v}" for k, v in data_values.items()])
+            try:
+                await web.state.tg_application.bot.send_message(
+                    chat_id=push_channel,
+                    text=f"📢 审核通过报告 #{report_id}\n@{report['username'] or 'unknown'}\n{detail}",
+                )
+            except Exception:
+                logger.warning("failed to push report %s to channel", report_id, exc_info=True)
+        safe_id = html.escape(str(report_id))
+        return HTMLResponse(f"<html><body>报告 #{safe_id} 已通过。<a href='/admin'>返回</a></body></html>")
+
+    @web.post("/admin/reject/{report_id}")
+    async def web_reject_report(report_id: int, request: Request, reason: str = Form(default="请联系管理员")):
+        _auth(request)
+        with db_connection() as conn:
+            report = conn.execute("SELECT * FROM reports WHERE id = ?", (report_id,)).fetchone()
+            if not report:
+                raise HTTPException(status_code=404, detail="报告不存在")
+            if report["status"] != "pending":
+                raise HTTPException(status_code=400, detail=f"报告已处于 {report['status']} 状态")
+            conn.execute(
+                "UPDATE reports SET status='rejected', review_feedback=?, reviewed_at=? WHERE id = ?",
+                (reason.strip() or "请联系管理员", utc_now_iso(), report_id),
+            )
+        tpl = setting_get("review_rejected_template", DEFAULT_SETTINGS["review_rejected_template"])
+        feedback = tpl.format(id=report_id, reason=reason.strip() or "请联系管理员")
+        try:
+            await web.state.tg_application.bot.send_message(chat_id=report["user_id"], text=feedback)
+        except Exception:
+            logger.warning("failed to notify user %s of rejection", report["user_id"], exc_info=True)
+        safe_id = html.escape(str(report_id))
+        return HTMLResponse(f"<html><body>报告 #{safe_id} 已驳回。<a href='/admin'>返回</a></body></html>")
 
     return web
 
