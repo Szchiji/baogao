@@ -810,73 +810,413 @@ def report_to_html(report_row: sqlite3.Row) -> str:
     return "\n".join(lines)
 
 
-def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] | None = None) -> str:
+_ADMIN_CSS = """
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f0f2f5;color:#333;font-size:14px}
+.container{max-width:960px;margin:0 auto;padding:20px}
+header{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;padding:14px 20px;background:#fff;border-radius:10px;box-shadow:0 1px 3px rgba(0,0,0,.1)}
+h1{font-size:1.2rem;font-weight:700;color:#1e293b}
+.logout{color:#64748b;text-decoration:none;font-size:.85rem;padding:6px 12px;border:1px solid #e2e8f0;border-radius:6px}
+.logout:hover{background:#f8fafc}
+.alert{padding:10px 16px;border-radius:8px;margin-bottom:16px;font-size:.9rem}
+.alert-success{background:#dcfce7;color:#166534;border:1px solid #86efac}
+.tabs-wrap{background:#fff;border-radius:10px;box-shadow:0 1px 3px rgba(0,0,0,.1);overflow:hidden}
+.tabs{display:flex;border-bottom:2px solid #e2e8f0;overflow-x:auto}
+.tab-btn{padding:12px 20px;border:none;background:none;cursor:pointer;font-size:.9rem;color:#64748b;white-space:nowrap;border-bottom:2px solid transparent;margin-bottom:-2px;transition:all .15s;font-family:inherit}
+.tab-btn:hover{color:#2563eb;background:#f8fafc}
+.tab-btn.active{color:#2563eb;font-weight:600;border-bottom-color:#2563eb}
+.tab-pane{display:none;padding:24px}
+.tab-pane.active{display:block}
+.field{margin-bottom:18px}
+.field-row{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:18px}
+label{display:block;font-size:.8rem;font-weight:600;color:#475569;margin-bottom:5px;text-transform:uppercase;letter-spacing:.04em}
+.hint{font-size:.78rem;color:#94a3b8;margin-top:4px}
+input[type=text],textarea,select{width:100%;padding:8px 10px;border:1px solid #cbd5e1;border-radius:6px;font-size:.9rem;font-family:inherit;background:#fff;transition:border-color .15s}
+input[type=text]:focus,textarea:focus,select:focus{outline:none;border-color:#2563eb;box-shadow:0 0 0 3px rgba(37,99,235,.1)}
+textarea{resize:vertical;min-height:70px}
+.btn{padding:8px 16px;border:none;border-radius:6px;cursor:pointer;font-size:.85rem;font-weight:500;transition:all .15s;font-family:inherit}
+.btn-primary{background:#2563eb;color:#fff}
+.btn-primary:hover{background:#1d4ed8}
+.btn-danger{background:#ef4444;color:#fff}
+.btn-danger:hover{background:#dc2626}
+.btn-success{background:#10b981;color:#fff}
+.btn-success:hover{background:#059669}
+.btn-sm{padding:4px 10px;font-size:.8rem}
+.btn-add{background:#eff6ff;color:#2563eb;border:1px dashed #93c5fd;padding:7px 14px;width:100%;border-radius:6px;cursor:pointer;font-size:.85rem;margin-top:6px;transition:all .15s;font-family:inherit}
+.btn-add:hover{background:#dbeafe}
+.editor-row{display:flex;gap:8px;align-items:center;margin-bottom:8px;padding:10px 12px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px}
+.editor-row input,.editor-row select{flex:1;min-width:60px}
+.section-title{font-size:.95rem;font-weight:700;color:#1e293b;margin-bottom:16px;padding-bottom:10px;border-bottom:1px solid #f1f5f9}
+.save-bar{background:#fff;border-top:1px solid #e2e8f0;padding:14px 24px;display:flex;justify-content:flex-end;gap:10px}
+.table{width:100%;border-collapse:collapse;font-size:.9rem}
+.table th,.table td{padding:10px 12px;text-align:left;border-bottom:1px solid #f1f5f9}
+.table th{background:#f8fafc;font-weight:600;color:#64748b;font-size:.8rem;text-transform:uppercase;letter-spacing:.04em}
+.table tbody tr:hover{background:#fafafa}
+.table td input{padding:5px 8px;border:1px solid #cbd5e1;border-radius:5px;font-size:.85rem;width:150px}
+.muted{color:#94a3b8;font-style:italic}
+.badge{display:inline-flex;align-items:center;justify-content:center;background:#ef4444;color:#fff;border-radius:10px;font-size:.7rem;font-weight:700;min-width:18px;height:18px;padding:0 5px;margin-left:4px;vertical-align:middle}
+@media(max-width:600px){.field-row{grid-template-columns:1fr}}
+"""
+
+_ADMIN_JS = """
+(function(){
+  var tabBtns=document.querySelectorAll('.tab-btn');
+  var tabPanes=document.querySelectorAll('.tab-pane');
+  var saveBar=document.getElementById('settings-save-bar');
+  tabBtns.forEach(function(btn){
+    btn.addEventListener('click',function(){
+      tabBtns.forEach(function(b){b.classList.remove('active');});
+      tabPanes.forEach(function(p){p.classList.remove('active');});
+      btn.classList.add('active');
+      document.getElementById('pane-'+btn.dataset.tab).classList.add('active');
+      if(saveBar) saveBar.style.display=btn.dataset.tab==='pending'?'none':'';
+    });
+  });
+
+  // Start Buttons Editor
+  var startBtnsData=__START_BUTTONS__;
+  var startRows=document.getElementById('start-btn-rows');
+  function makeStartRow(item){
+    var row=document.createElement('div'); row.className='editor-row';
+    var textIn=document.createElement('input');
+    textIn.type='text'; textIn.placeholder='按钮文字'; textIn.value=item.text||'';
+    textIn.dataset.field='text'; textIn.style.flex='1';
+    var urlIn=document.createElement('input');
+    urlIn.type='text'; urlIn.placeholder='链接 URL（https://...）'; urlIn.value=item.url||'';
+    urlIn.dataset.field='url'; urlIn.style.flex='2';
+    var rm=document.createElement('button');
+    rm.type='button'; rm.textContent='✕'; rm.className='btn btn-danger btn-sm';
+    rm.addEventListener('click',function(){row.remove();});
+    row.appendChild(textIn); row.appendChild(urlIn); row.appendChild(rm);
+    return row;
+  }
+  startBtnsData.forEach(function(item){startRows.appendChild(makeStartRow(item));});
+  document.getElementById('start-btn-add').addEventListener('click',function(){
+    startRows.appendChild(makeStartRow({text:'',url:''}));
+  });
+  function serializeStartBtns(){
+    var result=[];
+    startRows.querySelectorAll('.editor-row').forEach(function(row){
+      var text=row.querySelector('[data-field=text]').value.trim();
+      var url=row.querySelector('[data-field=url]').value.trim();
+      if(text&&url) result.push({text:text,url:url});
+    });
+    document.getElementById('start_buttons_json').value=JSON.stringify(result);
+  }
+
+  // Keyboard Buttons Editor
+  var kbData=__KB_BUTTONS__;
+  var kbRows=document.getElementById('kb-rows');
+  var KB_ACTIONS=[
+    {value:'write_report',label:'写报告（内置）'},
+    {value:'search_help',label:'查阅报告（内置）'},
+    {value:'contact',label:'联系管理员（内置）'},
+    {value:'usage',label:'操作方式（内置）'},
+    {value:'text',label:'自定义回复文本'}
+  ];
+  function makeKbRow(item){
+    var row=document.createElement('div'); row.className='editor-row';
+    var textIn=document.createElement('input');
+    textIn.type='text'; textIn.placeholder='按钮文字'; textIn.value=item.text||'';
+    textIn.dataset.field='text';
+    var sel=document.createElement('select');
+    sel.dataset.field='action'; sel.style.flex='none'; sel.style.width='180px';
+    KB_ACTIONS.forEach(function(a){
+      var opt=document.createElement('option');
+      opt.value=a.value; opt.textContent=a.label;
+      if(item.action===a.value) opt.selected=true;
+      sel.appendChild(opt);
+    });
+    var valIn=document.createElement('input');
+    valIn.type='text'; valIn.placeholder='回复内容'; valIn.value=item.value||'';
+    valIn.dataset.field='value';
+    valIn.style.display=(item.action==='text')?'':'none';
+    sel.addEventListener('change',function(){
+      valIn.style.display=sel.value==='text'?'':'none';
+    });
+    var rm=document.createElement('button');
+    rm.type='button'; rm.textContent='✕'; rm.className='btn btn-danger btn-sm';
+    rm.addEventListener('click',function(){row.remove();});
+    row.appendChild(textIn); row.appendChild(sel); row.appendChild(valIn); row.appendChild(rm);
+    return row;
+  }
+  kbData.forEach(function(item){kbRows.appendChild(makeKbRow(item));});
+  document.getElementById('kb-add').addEventListener('click',function(){
+    kbRows.appendChild(makeKbRow({text:'',action:'write_report',value:''}));
+  });
+  function serializeKb(){
+    var result=[];
+    kbRows.querySelectorAll('.editor-row').forEach(function(row){
+      var text=row.querySelector('[data-field=text]').value.trim();
+      var action=row.querySelector('[data-field=action]').value;
+      var value=row.querySelector('[data-field=value]').value.trim();
+      if(text){
+        var item={text:text,action:action};
+        if(action==='text'&&value) item.value=value;
+        result.push(item);
+      }
+    });
+    document.getElementById('keyboard_buttons_json').value=JSON.stringify(result);
+  }
+
+  // Report Template Editor
+  var tplData=__TEMPLATE__;
+  var tplFieldsEl=document.getElementById('template-fields');
+  var tplNameIn=document.getElementById('template-name');
+  tplNameIn.value=tplData.name||'';
+  function makeTplRow(field){
+    var row=document.createElement('div'); row.className='editor-row';
+    var keyIn=document.createElement('input');
+    keyIn.type='text'; keyIn.placeholder='英文标识（如 title）'; keyIn.value=field.key||'';
+    keyIn.dataset.field='key';
+    var labelIn=document.createElement('input');
+    labelIn.type='text'; labelIn.placeholder='显示名称（如 标题）'; labelIn.value=field.label||'';
+    labelIn.dataset.field='label';
+    var rm=document.createElement('button');
+    rm.type='button'; rm.textContent='✕'; rm.className='btn btn-danger btn-sm';
+    rm.addEventListener('click',function(){row.remove();});
+    row.appendChild(keyIn); row.appendChild(labelIn); row.appendChild(rm);
+    return row;
+  }
+  (tplData.fields||[]).forEach(function(f){tplFieldsEl.appendChild(makeTplRow(f));});
+  document.getElementById('template-add').addEventListener('click',function(){
+    tplFieldsEl.appendChild(makeTplRow({key:'',label:''}));
+  });
+  function serializeTemplate(){
+    var fields=[];
+    tplFieldsEl.querySelectorAll('.editor-row').forEach(function(row){
+      var key=row.querySelector('[data-field=key]').value.trim();
+      var label=row.querySelector('[data-field=label]').value.trim();
+      if(key&&label) fields.push({key:key,label:label});
+    });
+    var tpl={name:tplNameIn.value.trim()||'模板',fields:fields};
+    document.getElementById('report_template_json').value=JSON.stringify(tpl);
+  }
+
+  document.getElementById('settings-form').addEventListener('submit',function(){
+    serializeStartBtns();
+    serializeKb();
+    serializeTemplate();
+  });
+})();
+"""
+
+
+def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] | None = None, saved: bool = False) -> str:
     def e(key: str) -> str:
         return html.escape(settings_map.get(key, ""))
 
+    def safe_js(key: str, fallback: Any) -> str:
+        raw = settings_map.get(key, "")
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            parsed = fallback
+        return (
+            json.dumps(parsed, ensure_ascii=False)
+            .replace("</", r"<\/")
+            .replace("\u2028", r"\u2028")
+            .replace("\u2029", r"\u2029")
+        )
+
+    start_buttons_js = safe_js("start_buttons_json", [])
+    kb_buttons_js = safe_js("keyboard_buttons_json", [])
+    template_js = safe_js("report_template_json", {"name": "", "fields": []})
+
+    js = (
+        _ADMIN_JS
+        .replace("__START_BUTTONS__", start_buttons_js)
+        .replace("__KB_BUTTONS__", kb_buttons_js)
+        .replace("__TEMPLATE__", template_js)
+    )
+
+    pending_count = len(pending_reports) if pending_reports else 0
+    pending_badge = f'<span class="badge">{pending_count}</span>' if pending_count > 0 else ""
+
     if pending_reports:
         rows_html = "".join(
-            f"<tr>"
+            "<tr>"
             f"<td>#{r['id']}</td>"
             f"<td>@{html.escape(r['username'] or 'unknown')}</td>"
             f"<td>{html.escape(r['created_at'])}</td>"
-            f"<td>"
+            "<td>"
             f"<form method='post' action='/admin/approve/{r['id']}' style='display:inline'>"
-            f"<button type='submit'>✅ 通过</button></form> "
+            "<button class='btn btn-success btn-sm' type='submit'>✅ 通过</button></form> "
             f"<form method='post' action='/admin/reject/{r['id']}' style='display:inline'>"
-            f"<input name='reason' placeholder='驳回原因' required style='width:160px'>"
-            f"<button type='submit'>❌ 驳回</button></form>"
-            f"</td>"
-            f"</tr>"
+            "<input name='reason' placeholder='驳回原因' required>"
+            "<button class='btn btn-danger btn-sm' type='submit'>❌ 驳回</button></form>"
+            "</td></tr>"
             for r in pending_reports
         )
-        pending_section = (
-            "<hr><h3>待审核报告（" + str(len(pending_reports)) + "）</h3>"
-            "<table border='1' cellpadding='6' style='border-collapse:collapse;width:100%'>"
-            "<tr><th>ID</th><th>用户</th><th>提交时间</th><th>操作</th></tr>"
-            + rows_html
-            + "</table>"
+        pending_html = (
+            "<table class='table'><thead><tr>"
+            "<th>ID</th><th>用户</th><th>提交时间</th><th>操作</th>"
+            "</tr></thead><tbody>" + rows_html + "</tbody></table>"
         )
     else:
-        pending_section = "<hr><p>暂无待审核报告。</p>"
+        pending_html = "<p class='muted'>暂无待审核报告。</p>"
 
-    return f"""
-    <html><body style="font-family: sans-serif; max-width: 900px; margin: 24px auto;">
-    <h2>报告机器人管理后台</h2>
-    <form method="post" action="/admin/save">
-      <label>强制订阅频道（@channel）</label><br>
-      <input name="force_sub_channel" value="{e('force_sub_channel')}" style="width:100%"><br><br>
-      <label>报告推送频道（@channel）</label><br>
-      <input name="push_channel" value="{e('push_channel')}" style="width:100%"><br><br>
-      <label>/start 文本</label><br>
-      <textarea name="start_text" style="width:100%;height:90px">{e('start_text')}</textarea><br><br>
-      <label>/start 媒体类型（photo/video）</label><br>
-      <input name="start_media_type" value="{e('start_media_type')}" style="width:100%"><br><br>
-      <label>/start 媒体URL</label><br>
-      <input name="start_media_url" value="{e('start_media_url')}" style="width:100%"><br><br>
-      <label>/start 按钮 JSON（数组）</label><br>
-      <textarea name="start_buttons_json" style="width:100%;height:120px">{e('start_buttons_json')}</textarea><br><br>
-      <label>底部键盘 JSON（数组）</label><br>
-      <textarea name="keyboard_buttons_json" style="width:100%;height:120px">{e('keyboard_buttons_json')}</textarea><br><br>
-      <label>审核通过反馈模板</label><br>
-      <input name="review_approved_template" value="{e('review_approved_template')}" style="width:100%"><br><br>
-      <label>审核驳回反馈模板</label><br>
-      <input name="review_rejected_template" value="{e('review_rejected_template')}" style="width:100%"><br><br>
-      <label>报告模板 JSON（对象）</label><br>
-      <textarea name="report_template_json" style="width:100%;height:160px">{e('report_template_json')}</textarea><br><br>
-      <label>联系管理员文本</label><br>
-      <textarea name="contact_text" style="width:100%;height:70px">{e('contact_text')}</textarea><br><br>
-      <label>操作方式文本</label><br>
-      <textarea name="usage_text" style="width:100%;height:70px">{e('usage_text')}</textarea><br><br>
-      <label>查阅报告帮助文本</label><br>
-      <textarea name="search_help_text" style="width:100%;height:70px">{e('search_help_text')}</textarea><br><br>
-      <label>报告链接基地址（例如 https://domain.com）</label><br>
-      <input name="report_link_base" value="{e('report_link_base')}" style="width:100%"><br><br>
-      <button type="submit">保存配置</button>
-    </form>
-    {pending_section}
-    </body></html>
-    """
+    saved_banner = "<div class='alert alert-success'>✅ 配置已保存成功！</div>" if saved else ""
+
+    media_types = [("", "无"), ("photo", "图片"), ("video", "视频")]
+    current_media_type = settings_map.get("start_media_type", "").strip().lower()
+    media_type_options = "".join(
+        f"<option value='{v}'{' selected' if v == current_media_type else ''}>{label}</option>"
+        for v, label in media_types
+    )
+
+    return f"""<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>报告机器人管理后台</title>
+<style>{_ADMIN_CSS}</style>
+</head>
+<body><div class="container">
+
+<header>
+  <h1>📋 报告机器人管理后台</h1>
+  <a class="logout" href="/admin/logout">退出登录</a>
+</header>
+
+{saved_banner}
+
+<div class="tabs-wrap">
+<div class="tabs">
+  <button type="button" class="tab-btn active" data-tab="basic">基本设置</button>
+  <button type="button" class="tab-btn" data-tab="welcome">欢迎消息</button>
+  <button type="button" class="tab-btn" data-tab="keyboard">底部菜单</button>
+  <button type="button" class="tab-btn" data-tab="template">报告模板</button>
+  <button type="button" class="tab-btn" data-tab="texts">文本配置</button>
+  <button type="button" class="tab-btn" data-tab="review">审核设置</button>
+  <button type="button" class="tab-btn" data-tab="pending">待审核{pending_badge}</button>
+</div>
+
+<form id="settings-form" method="post" action="/admin/save">
+
+<div id="pane-basic" class="tab-pane active">
+  <p class="section-title">基本设置</p>
+  <div class="field-row">
+    <div class="field">
+      <label>强制订阅频道</label>
+      <input type="text" name="force_sub_channel" value="{e('force_sub_channel')}" placeholder="@频道用户名">
+      <div class="hint">填 @用户名，用户须先订阅该频道才能使用机器人（留空则不限制）</div>
+    </div>
+    <div class="field">
+      <label>报告推送频道</label>
+      <input type="text" name="push_channel" value="{e('push_channel')}" placeholder="@频道用户名">
+      <div class="hint">审核通过的报告自动推送到该频道（留空则不推送）</div>
+    </div>
+  </div>
+  <div class="field">
+    <label>报告链接基地址</label>
+    <input type="text" name="report_link_base" value="{e('report_link_base')}" placeholder="https://yourdomain.com">
+    <div class="hint">报告查询结果显示链接的前缀，链接格式为：域名/reports/ID（留空则仅显示报告 ID）</div>
+  </div>
+</div>
+
+<div id="pane-welcome" class="tab-pane">
+  <p class="section-title">欢迎消息（/start 命令）</p>
+  <div class="field">
+    <label>/start 欢迎文本</label>
+    <textarea name="start_text" rows="4">{e('start_text')}</textarea>
+    <div class="hint">支持 HTML 格式：&lt;b&gt;加粗&lt;/b&gt;、&lt;i&gt;斜体&lt;/i&gt;、&lt;a href="..."&gt;链接&lt;/a&gt;</div>
+  </div>
+  <div class="field-row">
+    <div class="field">
+      <label>媒体类型</label>
+      <select name="start_media_type">
+        {media_type_options}
+      </select>
+      <div class="hint">选择后需在右侧填写对应的媒体 URL</div>
+    </div>
+    <div class="field">
+      <label>媒体 URL</label>
+      <input type="text" name="start_media_url" value="{e('start_media_url')}" placeholder="https://...">
+      <div class="hint">图片或视频的直链地址</div>
+    </div>
+  </div>
+  <div class="field">
+    <label>欢迎消息内联按钮</label>
+    <div class="hint" style="margin-bottom:8px">显示在欢迎文字下方的按钮，点击后跳转链接</div>
+    <div id="start-btn-rows"></div>
+    <button type="button" class="btn-add" id="start-btn-add">＋ 添加按钮</button>
+    <input type="hidden" name="start_buttons_json" id="start_buttons_json">
+  </div>
+</div>
+
+<div id="pane-keyboard" class="tab-pane">
+  <p class="section-title">底部快捷键盘</p>
+  <div class="hint" style="margin-bottom:14px">配置用户输入框下方的快捷按钮。可绑定内置功能，也可自定义回复内容。</div>
+  <div id="kb-rows"></div>
+  <button type="button" class="btn-add" id="kb-add">＋ 添加按钮</button>
+  <input type="hidden" name="keyboard_buttons_json" id="keyboard_buttons_json">
+</div>
+
+<div id="pane-template" class="tab-pane">
+  <p class="section-title">报告填写模板</p>
+  <div class="field">
+    <label>模板名称</label>
+    <input type="text" id="template-name" placeholder="例如：日报">
+    <input type="hidden" name="report_template_json" id="report_template_json">
+  </div>
+  <div class="field">
+    <label>模板字段</label>
+    <div class="hint" style="margin-bottom:10px">字段标识用英文（作为数据键名），字段名称用中文（显示给用户）</div>
+    <div id="template-fields"></div>
+    <button type="button" class="btn-add" id="template-add">＋ 添加字段</button>
+  </div>
+</div>
+
+<div id="pane-texts" class="tab-pane">
+  <p class="section-title">功能文本配置</p>
+  <div class="field">
+    <label>查阅报告 — 帮助文本</label>
+    <textarea name="search_help_text" rows="3">{e('search_help_text')}</textarea>
+    <div class="hint">用户点击「查阅报告」后显示的提示，说明如何使用 @用户名 或 #标签 搜索</div>
+  </div>
+  <div class="field">
+    <label>联系管理员 — 文本</label>
+    <textarea name="contact_text" rows="3">{e('contact_text')}</textarea>
+  </div>
+  <div class="field">
+    <label>操作方式 — 说明文本</label>
+    <textarea name="usage_text" rows="5">{e('usage_text')}</textarea>
+  </div>
+</div>
+
+<div id="pane-review" class="tab-pane">
+  <p class="section-title">审核反馈通知</p>
+  <div class="field">
+    <label>审核通过 — 通知模板</label>
+    <input type="text" name="review_approved_template" value="{e('review_approved_template')}">
+    <div class="hint">使用 {{id}} 表示报告编号，例如：✅ 报告 #{{id}} 审核通过。</div>
+  </div>
+  <div class="field">
+    <label>审核驳回 — 通知模板</label>
+    <input type="text" name="review_rejected_template" value="{e('review_rejected_template')}">
+    <div class="hint">使用 {{id}} 表示编号，{{reason}} 表示驳回原因，例如：❌ 报告 #{{id}} 未通过：{{reason}}</div>
+  </div>
+</div>
+
+<div class="save-bar" id="settings-save-bar">
+  <button type="submit" class="btn btn-primary">💾 保存配置</button>
+</div>
+
+</form>
+
+<div id="pane-pending" class="tab-pane">
+  <p class="section-title">待审核报告（{pending_count} 条）</p>
+  {pending_html}
+</div>
+
+</div>
+</div>
+<script>{js}</script>
+</body>
+</html>
+"""
 
 
 async def ptb_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1023,6 +1363,7 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
         if redirect := _auth(request):
             return redirect
         should_set_cookie = _should_set_admin_cookie(request)
+        saved = request.query_params.get("saved") == "1"
         with db_connection() as conn:
             rows = conn.execute("SELECT key, value FROM settings").fetchall()
             pending_rows = conn.execute(
@@ -1030,7 +1371,7 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
             ).fetchall()
         settings_map = {r["key"]: r["value"] for r in rows}
         pending_list = [dict(r) for r in pending_rows]
-        response = HTMLResponse(build_admin_html(settings_map, pending_list))
+        response = HTMLResponse(build_admin_html(settings_map, pending_list, saved=saved))
         if should_set_cookie:
             response.set_cookie(
                 key="admin_token",
@@ -1092,7 +1433,7 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
         }
         for key, value in updates.items():
             setting_set(key, value)
-        return HTMLResponse("<html><body>保存成功。<a href='/admin'>返回</a></body></html>")
+        return RedirectResponse(url="/admin?saved=1", status_code=303)
 
     @web.get("/admin/settings")
     async def admin_settings(request: Request):
