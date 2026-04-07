@@ -4,7 +4,6 @@ import json
 import logging
 import os
 import sqlite3
-from asyncio import iscoroutine
 from contextlib import asynccontextmanager
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -89,6 +88,7 @@ class AppConfig:
     webhook_path: str
     host: str
     port: int
+    webhook_secret: str
     admin_panel_token: str
     admin_panel_url: str
 
@@ -101,9 +101,10 @@ def load_config() -> AppConfig:
         token=token,
         mode=os.getenv("BOT_MODE", "polling").strip().lower(),
         webhook_url=os.getenv("WEBHOOK_URL", "").strip(),
-        webhook_path=os.getenv("WEBHOOK_PATH", f"/webhook/{token}").strip(),
+        webhook_path=os.getenv("WEBHOOK_PATH", "/webhook").strip(),
         host=os.getenv("HOST", "0.0.0.0").strip(),
         port=int(os.getenv("PORT", "8000")),
+        webhook_secret=os.getenv("WEBHOOK_SECRET", "").strip(),
         admin_panel_token=os.getenv("ADMIN_PANEL_TOKEN", "").strip(),
         admin_panel_url=os.getenv("ADMIN_PANEL_URL", "").strip(),
     )
@@ -260,7 +261,7 @@ def report_fill_keyboard(values: dict[str, str], template: dict[str, Any]) -> In
     return InlineKeyboardMarkup(buttons)
 
 
-def user_is_admin(user_id: int) -> bool:
+def is_user_admin(user_id: int) -> bool:
     raw = os.getenv("ADMIN_USER_IDS", "")
     if not raw:
         return False
@@ -473,7 +474,7 @@ async def submit_report(context: ContextTypes.DEFAULT_TYPE, update: Update) -> N
 
 
 async def pending_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not user_is_admin(update.effective_user.id):
+    if not is_user_admin(update.effective_user.id):
         await update.message.reply_text("无权限。")
         return
     with db_connection() as conn:
@@ -491,7 +492,7 @@ async def pending_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def approve_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not user_is_admin(update.effective_user.id):
+    if not is_user_admin(update.effective_user.id):
         await update.message.reply_text("无权限。")
         return
     if not context.args:
@@ -528,7 +529,7 @@ async def approve_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def reject_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not user_is_admin(update.effective_user.id):
+    if not is_user_admin(update.effective_user.id):
         await update.message.reply_text("无权限。")
         return
     if not context.args:
@@ -664,15 +665,16 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
             if not config.webhook_url:
                 raise RuntimeError("WEBHOOK_URL is required when BOT_MODE=webhook")
             webhook_target = f"{config.webhook_url.rstrip('/')}{config.webhook_path}"
-            await application.bot.set_webhook(webhook_target)
+            await application.bot.set_webhook(
+                webhook_target,
+                secret_token=config.webhook_secret or None,
+            )
             logger.info("webhook set to %s", webhook_target)
         try:
             yield
         finally:
             if config.mode == "webhook":
-                result = application.bot.delete_webhook()
-                if iscoroutine(result):
-                    await result
+                await application.bot.delete_webhook()
             await application.stop()
             await application.shutdown()
 
@@ -681,6 +683,10 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
 
     @web.post(config.webhook_path)
     async def telegram_webhook(request: Request):
+        if config.webhook_secret:
+            secret = request.headers.get("x-telegram-bot-api-secret-token", "")
+            if secret != config.webhook_secret:
+                raise HTTPException(status_code=401, detail="invalid webhook secret")
         payload = await request.json()
         update = Update.de_json(payload, application.bot)
         await application.process_update(update)

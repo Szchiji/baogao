@@ -46,7 +46,8 @@
 
 Webhook 额外变量：
 - `WEBHOOK_URL`（必填）例如 `https://xxx.up.railway.app`
-- `WEBHOOK_PATH`（可选，默认 `/webhook/<BOT_TOKEN>`）
+- `WEBHOOK_PATH`（可选，默认 `/webhook`）
+- `WEBHOOK_SECRET`（建议填写）Telegram Webhook Secret Token
 - `HOST`（可选，默认 `0.0.0.0`）
 - `PORT`（可选，默认 `8000`）
 
