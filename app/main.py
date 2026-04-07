@@ -238,7 +238,7 @@ def start_keyboard() -> ReplyKeyboardMarkup:
 def _is_admin_entry_button(text: str, url: str) -> bool:
     lowered_text = text.strip().lower()
     lowered_url = url.strip().lower()
-    if "管理后台" in text:
+    if "管理后台" in lowered_text:
         return True
     if "admin" in lowered_text:
         return True
