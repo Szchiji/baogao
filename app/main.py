@@ -38,7 +38,7 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
-logger = logging.getLogger("baogao-bot")
+logger = logging.getLogger("report-bot")
 
 
 DB_PATH = Path(os.getenv("DB_PATH", "baogao.db"))
@@ -702,16 +702,24 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
             raise HTTPException(status_code=404, detail="report not found")
         return report_to_html(row)
 
-    def _auth(request: Request) -> bool:
+    def _auth(request: Request) -> None:
+        if not config.admin_panel_token:
+            return
+        cookie_token = request.cookies.get("admin_token", "")
+        if cookie_token == config.admin_panel_token:
+            return
+        query_token = request.query_params.get("token", "")
+        if query_token == config.admin_panel_token:
+            return
+        raise HTTPException(status_code=403, detail="forbidden")
+
+    def _should_set_admin_cookie(request: Request) -> bool:
         if not config.admin_panel_token:
             return False
-        cookie_token = request.cookies.get("admin_token", "")
-        query_token = request.query_params.get("token", "")
-        if cookie_token == config.admin_panel_token:
-            return False
-        if query_token == config.admin_panel_token:
-            return True
-        raise HTTPException(status_code=403, detail="forbidden")
+        return (
+            request.query_params.get("token", "") == config.admin_panel_token
+            and request.cookies.get("admin_token", "") != config.admin_panel_token
+        )
 
     @web.get("/admin/login", response_class=HTMLResponse)
     async def admin_login():
@@ -737,7 +745,8 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
 
     @web.get("/admin", response_class=HTMLResponse)
     async def admin_page(request: Request):
-        should_set_cookie = _auth(request)
+        _auth(request)
+        should_set_cookie = _should_set_admin_cookie(request)
         with db_connection() as conn:
             rows = conn.execute("SELECT key, value FROM settings").fetchall()
         settings_map = {r["key"]: r["value"] for r in rows}
@@ -748,7 +757,7 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
                 value=config.admin_panel_token,
                 httponly=True,
                 samesite="lax",
-                secure=True,
+                secure=request.url.scheme == "https",
             )
         return response
 
