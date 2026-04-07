@@ -728,8 +728,6 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
         try:
             yield
         finally:
-            if config.mode == "webhook":
-                await application.bot.delete_webhook()
             await application.stop()
             await application.shutdown()
 
