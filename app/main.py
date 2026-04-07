@@ -280,7 +280,7 @@ def _make_field_prompt(field: dict[str, Any], sequential: bool = True) -> tuple[
 
     markup = None
     if not required and sequential:
-        prompt += "\n\n（此项为可选，可跳过不填）"
+        prompt += "\n\n（此项为可选，可跳过不填写）"
         markup = InlineKeyboardMarkup(
             [[InlineKeyboardButton("⏭ 跳过此项", callback_data=f"skip_field:{field['key']}")]]
         )
@@ -1529,6 +1529,7 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
+    # Use the last (highest-resolution) photo variant provided by Telegram
     file_id = update.message.photo[-1].file_id
     draft["values"][key] = file_id
     draft["awaiting"] = ""
@@ -1839,33 +1840,40 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
         media_url: str,
         markup: InlineKeyboardMarkup | None,
     ) -> None:
-        for uid in user_ids:
-            try:
-                if media_type == "photo" and media_url:
-                    await bot.send_photo(
-                        chat_id=uid,
-                        photo=media_url,
-                        caption=text or None,
-                        parse_mode=ParseMode.HTML if text else None,
-                        reply_markup=markup,
-                    )
-                elif media_type == "video" and media_url:
-                    await bot.send_video(
-                        chat_id=uid,
-                        video=media_url,
-                        caption=text or None,
-                        parse_mode=ParseMode.HTML if text else None,
-                        reply_markup=markup,
-                    )
-                elif text:
-                    await bot.send_message(
-                        chat_id=uid,
-                        text=text,
-                        parse_mode=ParseMode.HTML,
-                        reply_markup=markup,
-                    )
-            except Exception:
-                logger.warning("broadcast failed for user %s", uid, exc_info=True)
+        # Send in batches with a short delay to stay within Telegram rate limits
+        _BATCH_SIZE = 25
+        _BATCH_DELAY = 1.0  # seconds between batches
+        for batch_start in range(0, len(user_ids), _BATCH_SIZE):
+            batch = user_ids[batch_start : batch_start + _BATCH_SIZE]
+            for uid in batch:
+                try:
+                    if media_type == "photo" and media_url:
+                        await bot.send_photo(
+                            chat_id=uid,
+                            photo=media_url,
+                            caption=text or None,
+                            parse_mode=ParseMode.HTML if text else None,
+                            reply_markup=markup,
+                        )
+                    elif media_type == "video" and media_url:
+                        await bot.send_video(
+                            chat_id=uid,
+                            video=media_url,
+                            caption=text or None,
+                            parse_mode=ParseMode.HTML if text else None,
+                            reply_markup=markup,
+                        )
+                    elif text:
+                        await bot.send_message(
+                            chat_id=uid,
+                            text=text,
+                            parse_mode=ParseMode.HTML,
+                            reply_markup=markup,
+                        )
+                except Exception:
+                    logger.warning("broadcast failed for user %s", uid, exc_info=True)
+            if batch_start + _BATCH_SIZE < len(user_ids):
+                await asyncio.sleep(_BATCH_DELAY)
 
     @web.post("/admin/broadcast")
     async def admin_broadcast(
