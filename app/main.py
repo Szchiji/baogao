@@ -151,6 +151,9 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status, id DESC)"
+        )
         for key, value in DEFAULT_SETTINGS.items():
             conn.execute(
                 "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (key, value)
@@ -463,9 +466,14 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("请先完成频道订阅后再使用。")
         return
 
-    # Admin reject-reason flow: if an admin sent a reject reason, process it
+    # Admin reject-reason flow: only when admin is NOT mid-draft to avoid ambiguity
     pending_reject_id = context.user_data.get("pending_reject_id")
-    if pending_reject_id is not None and is_user_admin(update.effective_user.id):
+    active_draft = context.user_data.get("report_draft")
+    if (
+        pending_reject_id is not None
+        and is_user_admin(update.effective_user.id)
+        and not (active_draft and active_draft.get("awaiting"))
+    ):
         context.user_data.pop("pending_reject_id", None)
         reason = text
         with db_connection() as conn:
@@ -782,6 +790,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await query.answer()
         await query.message.reply_text(f"请输入驳回报告 #{report_id} 的原因：")
         return
+
+    # Fallback: answer unhandled callback queries to avoid Telegram timeout errors
+    await query.answer()
 
 
 def report_to_html(report_row: sqlite3.Row) -> str:
@@ -1115,10 +1126,11 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
                 )
             except Exception:
                 logger.warning("failed to push report %s to channel", report_id, exc_info=True)
-        return HTMLResponse(f"<html><body>报告 #{report_id} 已通过。<a href='/admin'>返回</a></body></html>")
+        safe_id = html.escape(str(report_id))
+        return HTMLResponse(f"<html><body>报告 #{safe_id} 已通过。<a href='/admin'>返回</a></body></html>")
 
     @web.post("/admin/reject/{report_id}")
-    async def web_reject_report(report_id: int, request: Request, reason: str = Form("请联系管理员")):
+    async def web_reject_report(report_id: int, request: Request, reason: str = Form(default="请联系管理员")):
         _auth(request)
         with db_connection() as conn:
             report = conn.execute("SELECT * FROM reports WHERE id = ?", (report_id,)).fetchone()
@@ -1136,7 +1148,8 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
             await web.state.tg_application.bot.send_message(chat_id=report["user_id"], text=feedback)
         except Exception:
             logger.warning("failed to notify user %s of rejection", report["user_id"], exc_info=True)
-        return HTMLResponse(f"<html><body>报告 #{report_id} 已驳回。<a href='/admin'>返回</a></body></html>")
+        safe_id = html.escape(str(report_id))
+        return HTMLResponse(f"<html><body>报告 #{safe_id} 已驳回。<a href='/admin'>返回</a></body></html>")
 
     return web
 
