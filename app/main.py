@@ -311,6 +311,7 @@ def build_channel_link(channel: str) -> str | None:
         return f"https://t.me/{value[1:]}"
     if value.startswith("https://t.me/"):
         return value
+    # Private/supergroup chat IDs are numeric and commonly start with -100, no public t.me link.
     if value.isdigit() or value.startswith("-100"):
         return None
     return f"https://t.me/{value}"
@@ -447,7 +448,7 @@ async def submit_report(context: ContextTypes.DEFAULT_TYPE, update: Update) -> N
         await update.effective_chat.send_message("请先点击“写报告”。")
         return
     required_fields = [f["key"] for f in draft["template"]["fields"]]
-    missing = [k for k in required_fields if not draft["values"].get(k)]
+    missing = [k for k in required_fields if not draft["values"].get(k, "").strip()]
     if missing:
         await update.effective_chat.send_message("仍有未填写项，请继续完善。")
         return
@@ -721,6 +722,12 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
             and request.cookies.get("admin_token", "") != config.admin_panel_token
         )
 
+    def _is_secure_request(request: Request) -> bool:
+        if request.url.scheme == "https":
+            return True
+        forwarded_proto = request.headers.get("x-forwarded-proto", "")
+        return forwarded_proto.lower() == "https"
+
     @web.get("/admin/login", response_class=HTMLResponse)
     async def admin_login():
         if not config.admin_panel_token:
@@ -757,7 +764,7 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
                 value=config.admin_panel_token,
                 httponly=True,
                 samesite="lax",
-                secure=request.url.scheme == "https",
+                secure=_is_secure_request(request),
             )
         return response
 
@@ -781,9 +788,9 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
     ):
         _auth(request)
         try:
-            json.loads(start_buttons_json)
-            json.loads(keyboard_buttons_json)
-            json.loads(report_template_json)
+            start_buttons_obj = json.loads(start_buttons_json)
+            keyboard_buttons_obj = json.loads(keyboard_buttons_json)
+            report_template_obj = json.loads(report_template_json)
         except json.JSONDecodeError:
             raise HTTPException(status_code=400, detail="JSON 配置格式错误")
 
@@ -793,11 +800,11 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
             "start_text": start_text,
             "start_media_type": start_media_type.strip(),
             "start_media_url": start_media_url.strip(),
-            "start_buttons_json": start_buttons_json,
-            "keyboard_buttons_json": keyboard_buttons_json,
+            "start_buttons_json": json.dumps(start_buttons_obj, ensure_ascii=False),
+            "keyboard_buttons_json": json.dumps(keyboard_buttons_obj, ensure_ascii=False),
             "review_approved_template": review_approved_template,
             "review_rejected_template": review_rejected_template,
-            "report_template_json": report_template_json,
+            "report_template_json": json.dumps(report_template_obj, ensure_ascii=False),
             "contact_text": contact_text,
             "usage_text": usage_text,
             "search_help_text": search_help_text,
