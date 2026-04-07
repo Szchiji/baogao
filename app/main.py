@@ -427,16 +427,16 @@ async def query_reports(text: str) -> str:
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     has_message = bool(update.message)
-    has_text = bool(update.message and update.message.text)
-    if not has_message or not has_text:
+    message_text = getattr(update.message, "text", None) if update.message else None
+    if not has_message or not message_text:
         logger.info(
-            "on_text skipped: has_message=%s has_text=%s update_id=%s",
+            "on_text skipped: has_message=%s message_text_present=%s update_id=%s",
             has_message,
-            has_text,
+            bool(message_text),
             update.update_id,
         )
         return
-    text = update.message.text.strip()
+    text = message_text.strip()
 
     channel = setting_get("force_sub_channel", "").strip()
     if channel and not await is_subscribed(context.bot, update.effective_user.id):
@@ -742,7 +742,7 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
             bool(update.message),
             bool(update.callback_query),
             getattr(update.message, "text", None) if update.message else None,
-            update.callback_query.data if update.callback_query else None,
+            getattr(update.callback_query, "data", None) if update.callback_query else None,
             update.effective_user.id if update.effective_user else None,
             update.effective_chat.id if update.effective_chat else None,
         )
