@@ -428,7 +428,7 @@ async def query_reports(text: str) -> str:
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     has_message = bool(update.message)
     has_text = bool(update.message and update.message.text)
-    if not update.message or not update.message.text:
+    if not has_message or not has_text:
         logger.info(
             "on_text skipped: has_message=%s has_text=%s update_id=%s",
             has_message,
@@ -741,7 +741,7 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
             update.update_id,
             bool(update.message),
             bool(update.callback_query),
-            update.message.text if update.message else None,
+            getattr(update.message, "text", None) if update.message else None,
             update.callback_query.data if update.callback_query else None,
             update.effective_user.id if update.effective_user else None,
             update.effective_chat.id if update.effective_chat else None,
