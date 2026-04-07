@@ -41,8 +41,8 @@
 - `BOT_MODE`（可选，默认 `polling`）
 - `ADMIN_USER_IDS`（可选）管理员 Telegram User ID，逗号分隔
 - `DB_PATH`（可选，默认 `baogao.db`）
-- `ADMIN_PANEL_URL`（建议填写）管理后台外网 URL（例如 `https://xxx.up.railway.app/admin`）
-- `ADMIN_PANEL_TOKEN`（建议填写）后台访问令牌
+- `ADMIN_PANEL_URL`（建议填写）管理后台外网 URL（建议 `https://xxx.up.railway.app/admin/login`）
+- `ADMIN_PANEL_TOKEN`（建议填写）后台访问令牌（登录后写入 HttpOnly Cookie）
 
 Webhook 额外变量：
 - `WEBHOOK_URL`（必填）例如 `https://xxx.up.railway.app`

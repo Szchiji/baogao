@@ -15,6 +15,7 @@ import uvicorn
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from telegram import (
+    Bot,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
@@ -213,7 +214,7 @@ def report_template() -> dict[str, Any]:
     return {"name": str(data.get("name", "模板")), "fields": valid_fields}
 
 
-async def is_subscribed(bot, user_id: int) -> bool:
+async def is_subscribed(bot: Bot, user_id: int) -> bool:
     channel = setting_get("force_sub_channel", "").strip()
     if not channel:
         return True
@@ -331,11 +332,10 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     base_url = context.bot_data.get("admin_panel_url") or setting_get("admin_panel_url")
-    token = context.bot_data.get("admin_panel_token")
     if not base_url:
         await update.message.reply_text("未配置 ADMIN_PANEL_URL。")
         return
-    url = f"{base_url}?token={token}" if token else base_url
+    url = base_url
     button = InlineKeyboardMarkup(
         [[InlineKeyboardButton("打开管理后台", web_app=WebAppInfo(url=url))]]
     )
@@ -598,18 +598,14 @@ def report_to_html(report_row: sqlite3.Row) -> str:
     return "\n".join(lines)
 
 
-def build_admin_html(settings_map: dict[str, str], admin_token: str) -> str:
-    token_query = ""
-    if admin_token:
-        token_query = f"?token={html.escape(admin_token)}"
-
+def build_admin_html(settings_map: dict[str, str]) -> str:
     def e(key: str) -> str:
         return html.escape(settings_map.get(key, ""))
 
     return f"""
     <html><body style="font-family: sans-serif; max-width: 900px; margin: 24px auto;">
     <h2>报告机器人管理后台</h2>
-    <form method="post" action="/admin/save{token_query}">
+    <form method="post" action="/admin/save">
       <label>强制订阅频道（@channel）</label><br>
       <input name="force_sub_channel" value="{e('force_sub_channel')}" style="width:100%"><br><br>
       <label>报告推送频道（@channel）</label><br>
@@ -706,20 +702,55 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
             raise HTTPException(status_code=404, detail="report not found")
         return report_to_html(row)
 
-    def _auth(request: Request) -> None:
+    def _auth(request: Request) -> bool:
         if not config.admin_panel_token:
-            return
-        token = request.query_params.get("token", "")
-        if token != config.admin_panel_token:
-            raise HTTPException(status_code=403, detail="forbidden")
+            return False
+        cookie_token = request.cookies.get("admin_token", "")
+        query_token = request.query_params.get("token", "")
+        if cookie_token == config.admin_panel_token:
+            return False
+        if query_token == config.admin_panel_token:
+            return True
+        raise HTTPException(status_code=403, detail="forbidden")
+
+    @web.get("/admin/login", response_class=HTMLResponse)
+    async def admin_login():
+        if not config.admin_panel_token:
+            raise HTTPException(status_code=400, detail="admin token not set")
+        return HTMLResponse(
+            """
+            <html><body style="font-family:sans-serif;max-width:480px;margin:40px auto;">
+              <h3>管理员登录</h3>
+              <form method="get" action="/admin">
+                <input type="password" name="token" placeholder="ADMIN_PANEL_TOKEN" style="width:100%"><br><br>
+                <button type="submit">登录</button>
+              </form>
+            </body></html>
+            """
+        )
+
+    @web.get("/admin/logout")
+    async def admin_logout():
+        response = HTMLResponse("已退出。")
+        response.delete_cookie("admin_token")
+        return response
 
     @web.get("/admin", response_class=HTMLResponse)
     async def admin_page(request: Request):
-        _auth(request)
+        should_set_cookie = _auth(request)
         with db_connection() as conn:
             rows = conn.execute("SELECT key, value FROM settings").fetchall()
         settings_map = {r["key"]: r["value"] for r in rows}
-        return build_admin_html(settings_map, config.admin_panel_token)
+        response = HTMLResponse(build_admin_html(settings_map))
+        if should_set_cookie:
+            response.set_cookie(
+                key="admin_token",
+                value=config.admin_panel_token,
+                httponly=True,
+                samesite="lax",
+                secure=True,
+            )
+        return response
 
     @web.post("/admin/save")
     async def save_admin(
@@ -765,8 +796,7 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
         }
         for key, value in updates.items():
             setting_set(key, value)
-        back = f"/admin?token={config.admin_panel_token}" if config.admin_panel_token else "/admin"
-        return HTMLResponse(f"<html><body>保存成功。<a href='{back}'>返回</a></body></html>")
+        return HTMLResponse("<html><body>保存成功。<a href='/admin'>返回</a></body></html>")
 
     @web.get("/admin/settings")
     async def admin_settings(request: Request):
