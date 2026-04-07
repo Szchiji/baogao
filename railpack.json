@@ -1,0 +1,7 @@
+{
+  "$schema": "https://railpack.com/schema.json",
+  "version": "1",
+  "deploy": {
+    "startCommand": "python -m app.main"
+  }
+}
