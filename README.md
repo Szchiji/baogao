@@ -35,6 +35,9 @@
 
 `python -m app.main`
 
+> ⚠️ **数据持久化**：Railway 默认使用临时文件系统，**重新部署后数据库文件会丢失**（包括所有管理后台设置、用户记录等）。
+> 解决方法：在 Railway 项目中挂载 **Volume**（持久化存储），并将 `DB_PATH` 环境变量设置为 Volume 内的路径，例如 `/data/baogao.db`。
+
 ## 环境变量
 
 - `BOT_TOKEN`（必填）Telegram Bot Token
