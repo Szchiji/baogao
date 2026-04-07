@@ -1012,7 +1012,12 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
             parsed = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
             parsed = fallback
-        return json.dumps(parsed, ensure_ascii=False).replace("</", r"<\/")
+        return (
+            json.dumps(parsed, ensure_ascii=False)
+            .replace("</", r"<\/")
+            .replace("\u2028", r"\u2028")
+            .replace("\u2029", r"\u2029")
+        )
 
     start_buttons_js = safe_js("start_buttons_json", [])
     kb_buttons_js = safe_js("keyboard_buttons_json", [])
