@@ -3,7 +3,9 @@ import html
 import json
 import logging
 import os
+import secrets
 import sqlite3
+import time
 from contextlib import asynccontextmanager
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -14,7 +16,7 @@ from urllib.parse import urlparse
 
 import uvicorn
 from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from telegram import (
     Bot,
     InlineKeyboardButton,
@@ -22,7 +24,6 @@ from telegram import (
     KeyboardButton,
     ReplyKeyboardMarkup,
     Update,
-    WebAppInfo,
 )
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -42,6 +43,26 @@ logging.basicConfig(
 logger = logging.getLogger("report-bot")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+
+# In-memory state for admin panel verification (resets on restart, by design)
+_verify_codes: dict[str, float] = {}    # code -> expiry_timestamp
+_verify_code_otps: dict[str, str] = {}  # code -> otp_token (set after Telegram verification)
+_otp_tokens: dict[str, float] = {}      # token -> expiry_timestamp
+
+_VERIFY_CODE_TTL = 600   # 10 minutes
+_OTP_TOKEN_TTL = 300     # 5 minutes
+
+
+def _cleanup_verify_state() -> None:
+    now = time.time()
+    expired_codes = [k for k, v in _verify_codes.items() if v < now]
+    for k in expired_codes:
+        _verify_codes.pop(k, None)
+        _verify_code_otps.pop(k, None)
+    expired_otps = [k for k, v in _otp_tokens.items() if v < now]
+    for k in expired_otps:
+        _otp_tokens.pop(k, None)
 
 
 DB_PATH = Path(os.getenv("DB_PATH", "baogao.db"))
@@ -82,6 +103,7 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "usage_text": "1. 点击“写报告”填写模板\n2. 填完后提交审核\n3. 审核通过后可查阅。",
     "search_help_text": "发送 @用户名 或 #标签 查询报告。",
     "report_link_base": "",
+    "push_detail_fields_json": "[]",
 }
 
 
@@ -171,6 +193,16 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS blacklist (
+              user_id INTEGER PRIMARY KEY,
+              username TEXT,
+              reason TEXT,
+              added_at TEXT NOT NULL
+            )
+            """
+        )
         for key, value in DEFAULT_SETTINGS.items():
             conn.execute(
                 "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (key, value)
@@ -229,6 +261,33 @@ def upsert_user(user_id: int, username: str | None) -> None:
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
+
+def is_user_banned(user_id: int) -> bool:
+    with db_connection() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM blacklist WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        return row is not None
+
+
+def ban_user(user_id: int, username: str | None, reason: str) -> None:
+    now = utc_now_iso()
+    with db_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO blacklist (user_id, username, reason, added_at) VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+              username=excluded.username,
+              reason=excluded.reason,
+              added_at=excluded.added_at
+            """,
+            (user_id, username or "", reason or "管理员限制", now),
+        )
+
+
+def unban_user(user_id: int) -> None:
+    with db_connection() as conn:
+        conn.execute("DELETE FROM blacklist WHERE user_id = ?", (user_id,))
 
 def keyboard_config() -> list[dict[str, str]]:
     items = parse_json(setting_get("keyboard_buttons_json"), [])
@@ -346,6 +405,16 @@ def _is_admin_entry_button(text: str, url: str) -> bool:
     return path.startswith("/admin/")
 
 
+def _admin_verify_url(base_url: str) -> str:
+    """Return the /admin/verify URL for the Telegram entry button."""
+    base = base_url.rstrip("/")
+    for suffix in ("/admin/verify", "/admin/login", "/admin"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+            break
+    return f"{base}/admin/verify"
+
+
 def start_inline_buttons(user_id: int | None = None) -> InlineKeyboardMarkup | None:
     raw_buttons = parse_json(setting_get("start_buttons_json"), [])
     is_admin = user_id is not None and is_user_admin(user_id)
@@ -356,9 +425,10 @@ def start_inline_buttons(user_id: int | None = None) -> InlineKeyboardMarkup | N
             text = str(item["text"])
             url = str(item["url"])
             if _is_admin_entry_button(text, url):
-                if not is_admin or not admin_panel_url:
+                if not admin_panel_url:
                     continue
-                url = _normalize_admin_url(admin_panel_url)
+                # All users see the verify page; only admins can complete verification
+                url = _admin_verify_url(admin_panel_url)
             buttons.append([InlineKeyboardButton(text, url=url)])
     return InlineKeyboardMarkup(buttons) if buttons else None
 
@@ -486,6 +556,9 @@ def build_channel_link(channel: str) -> str | None:
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     upsert_user(user_id, update.effective_user.username)
+    if is_user_banned(user_id):
+        await update.effective_chat.send_message("您已被限制使用此机器人。")
+        return
     channel = setting_get("force_sub_channel", "").strip()
     if channel and not await is_subscribed(context.bot, user_id):
         rows = [[InlineKeyboardButton("我已订阅，重新检测", callback_data="retry_sub")]]
@@ -499,15 +572,21 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    base_url = context.bot_data.get("admin_panel_url") or setting_get("admin_panel_url")
+    if not is_user_admin(update.effective_user.id):
+        await update.message.reply_text("无权限。")
+        return
+    base_url = (context.bot_data.get("admin_panel_url") or setting_get("admin_panel_url")).strip()
     if not base_url:
         await update.message.reply_text("未配置 ADMIN_PANEL_URL。")
         return
-    url = _normalize_admin_url(base_url)
-    button = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("打开管理后台", web_app=WebAppInfo(url=url))]]
+    _cleanup_verify_state()
+    otp = secrets.token_urlsafe(16)
+    _otp_tokens[otp] = time.time() + _OTP_TOKEN_TTL
+    login_url = f"{base_url.rstrip('/')}/admin/otp?token={otp}"
+    await update.message.reply_text(
+        f"🔐 您的后台登录链接（{_OTP_TOKEN_TTL // 60} 分钟内有效）：\n{login_url}",
+        disable_web_page_preview=True,
     )
-    await update.message.reply_text("点击进入管理后台：", reply_markup=button)
 
 
 def start_report_draft(context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
@@ -527,10 +606,12 @@ async def write_report_flow(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     draft["awaiting"] = first_field["key"]
     draft["sequential"] = True
     prompt, markup = _make_field_prompt(first_field, sequential=True)
-    await update.message.reply_text(
+    sent = await update.message.reply_text(
         f"📝 开始填写《{draft['template']['name']}》\n\n{prompt}",
         reply_markup=markup,
     )
+    draft["prompt_msg_id"] = sent.message_id
+    draft["prompt_chat_id"] = update.effective_chat.id
 
 
 async def query_reports(text: str) -> str:
@@ -577,6 +658,17 @@ async def query_reports(text: str) -> str:
     return "\n".join(lines)
 
 
+async def _delete_prompt_message(context: ContextTypes.DEFAULT_TYPE, draft: dict[str, Any]) -> None:
+    """Try to delete the stored prompt message from a draft."""
+    msg_id = draft.pop("prompt_msg_id", None)
+    chat_id = draft.pop("prompt_chat_id", None)
+    if msg_id and chat_id:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+        except Exception:
+            pass  # message may already be deleted or too old
+
+
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     has_message = bool(update.message)
     message_text = getattr(update.message, "text", None) if update.message else None
@@ -592,6 +684,10 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     user = update.effective_user
     upsert_user(user.id, user.username)
+
+    if is_user_banned(user.id):
+        await update.message.reply_text("您已被限制使用此机器人。")
+        return
 
     channel = setting_get("force_sub_channel", "").strip()
     if channel and not await is_subscribed(context.bot, update.effective_user.id):
@@ -651,12 +747,16 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             fields = draft["template"]["fields"]
             current_idx = next((i for i, f in enumerate(fields) if f["key"] == key), -1)
             next_idx = current_idx + 1
+            # Delete previous prompt before sending next
+            await _delete_prompt_message(context, draft)
             if next_idx < len(fields):
                 next_field = fields[next_idx]
                 draft["awaiting"] = next_field["key"]
                 draft["sequential"] = True
                 prompt, markup = _make_field_prompt(next_field, sequential=True)
-                await update.message.reply_text(prompt, reply_markup=markup)
+                sent = await update.message.reply_text(prompt, reply_markup=markup)
+                draft["prompt_msg_id"] = sent.message_id
+                draft["prompt_chat_id"] = update.effective_chat.id
                 return
 
         await update.message.reply_text(
@@ -665,6 +765,27 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             reply_markup=_report_submit_keyboard(),
         )
         return
+
+    # Verify code check (only when not in a draft/admin flow)
+    if _is_verify_code(text):
+        _cleanup_verify_state()
+        if text in _verify_codes and time.time() < _verify_codes[text]:
+            if is_user_admin(user.id):
+                otp = secrets.token_urlsafe(16)
+                _otp_tokens[otp] = time.time() + _OTP_TOKEN_TTL
+                _verify_code_otps[text] = otp
+                base_url = (context.bot_data.get("admin_panel_url") or setting_get("admin_panel_url")).strip()
+                if base_url:
+                    login_url = f"{base_url.rstrip('/')}/admin/otp?token={otp}"
+                    await update.message.reply_text(
+                        f"✅ 身份验证成功！请点击以下链接登录后台（{_OTP_TOKEN_TTL // 60} 分钟内有效）：\n{login_url}",
+                        disable_web_page_preview=True,
+                    )
+                else:
+                    await update.message.reply_text("✅ 验证成功，但未配置 ADMIN_PANEL_URL。")
+            else:
+                await update.message.reply_text("❌ 您不是管理员，访问请求已拒绝。")
+            return
 
     if text.startswith("@") or text.startswith("#"):
         await update.message.reply_text(await query_reports(text))
@@ -693,6 +814,13 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(setting_get("usage_text"))
     else:
         await update.message.reply_text(item.get("value") or "已收到。")
+
+
+def _is_verify_code(text: str) -> bool:
+    """Return True if text looks like an admin verify code (8 uppercase hex chars)."""
+    if len(text) != 8:
+        return False
+    return all(c in "0123456789ABCDEF" for c in text)
 
 
 async def submit_report(context: ContextTypes.DEFAULT_TYPE, update: Update) -> None:
@@ -805,25 +933,41 @@ async def _push_report_to_channel(bot: Bot, report_id: int, report: sqlite3.Row)
     data_values = parse_json(report["data_json"], {})
     link_base = setting_get("report_link_base", "").strip()
     link = f"{link_base.rstrip('/')}/reports/{report_id}" if link_base else ""
-    # Build detail text: only text fields (not photo fields), using labels
+    # Build per-field placeholders (field key → value, excluding photo fields)
     tpl_fields = report_template()["fields"]
     field_labels = {f["key"]: f["label"] for f in tpl_fields}
     field_types = {f["key"]: f.get("type", "text") for f in tpl_fields}
-    detail_parts = []
-    for k, v in data_values.items():
-        if field_types.get(k, "text") == "photo":
-            continue
-        label = field_labels.get(k, k)
-        detail_parts.append(f"{label}: {v}")
+    field_placeholders: dict[str, str] = {}
+    for f in tpl_fields:
+        k = f["key"]
+        if field_types.get(k, "text") != "photo":
+            field_placeholders[k] = data_values.get(k, "")
+    # Build {detail}: honour push_detail_fields_json ordering if configured
+    push_detail_keys = parse_json(setting_get("push_detail_fields_json", "[]"), [])
+    if isinstance(push_detail_keys, list) and push_detail_keys:
+        detail_parts = []
+        for k in push_detail_keys:
+            if isinstance(k, str) and field_types.get(k, "text") != "photo":
+                label = field_labels.get(k, k)
+                detail_parts.append(f"{label}: {data_values.get(k, '')}")
+    else:
+        detail_parts = []
+        for f in tpl_fields:
+            k = f["key"]
+            if field_types.get(k, "text") == "photo":
+                continue
+            detail_parts.append(f"{field_labels.get(k, k)}: {data_values.get(k, '')}")
     detail = "\n".join(detail_parts)
     push_tpl = setting_get("push_template", DEFAULT_SETTINGS["push_template"])
-    push_text = safe_format(
-        push_tpl,
-        id=report_id,
-        username=report["username"] or "unknown",
-        detail=detail,
-        link=link,
-    )
+    # Merge: built-in keys always win over field-specific ones
+    format_kwargs: dict[str, Any] = dict(field_placeholders)
+    format_kwargs.update({
+        "id": report_id,
+        "username": report["username"] or "unknown",
+        "detail": detail,
+        "link": link,
+    })
+    push_text = safe_format(push_tpl, **format_kwargs)
     try:
         msg = await bot.send_message(chat_id=push_channel, text=push_text)
         channel_link = _build_channel_message_link(push_channel, msg.message_id)
@@ -916,6 +1060,39 @@ async def reject_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.message.reply_text(f"报告 #{report_id} 已驳回。")
 
 
+async def ban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_user_admin(update.effective_user.id):
+        await update.message.reply_text("无权限。")
+        return
+    if not context.args:
+        await update.message.reply_text("用法：/ban 用户ID [原因]")
+        return
+    try:
+        target_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("用户ID必须是数字。")
+        return
+    reason = " ".join(context.args[1:]).strip() or "管理员限制"
+    ban_user(target_id, None, reason)
+    await update.message.reply_text(f"用户 {target_id} 已加入黑名单（原因：{reason}）。")
+
+
+async def unban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_user_admin(update.effective_user.id):
+        await update.message.reply_text("无权限。")
+        return
+    if not context.args:
+        await update.message.reply_text("用法：/unban 用户ID")
+        return
+    try:
+        target_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("用户ID必须是数字。")
+        return
+    unban_user(target_id)
+    await update.message.reply_text(f"用户 {target_id} 已从黑名单移除。")
+
+
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     data = query.data or ""
@@ -934,13 +1111,16 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await query.message.reply_text("检测失败，请确认订阅后重试。")
         return
 
+    draft = context.user_data.get("report_draft")
+
     if data == "cancel_report":
         await query.answer()
+        if draft:
+            await _delete_prompt_message(context, draft)
         context.user_data.pop("report_draft", None)
         await query.message.reply_text("❌ 已取消填写报告。")
         return
 
-    draft = context.user_data.get("report_draft")
     if data.startswith("fill:"):
         await query.answer()
         if not draft:
@@ -967,12 +1147,16 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         fields = draft["template"]["fields"]
         current_idx = next((i for i, f in enumerate(fields) if f["key"] == key), -1)
         next_idx = current_idx + 1
+        # Delete the previous prompt
+        await _delete_prompt_message(context, draft)
         if next_idx < len(fields):
             next_field = fields[next_idx]
             draft["awaiting"] = next_field["key"]
             draft["sequential"] = True
             prompt, markup = _make_field_prompt(next_field, sequential=True)
-            await query.message.reply_text(prompt, reply_markup=markup)
+            sent = await query.message.reply_text(prompt, reply_markup=markup)
+            draft["prompt_msg_id"] = sent.message_id
+            draft["prompt_chat_id"] = query.message.chat_id
         else:
             await query.message.reply_text(
                 render_report_preview(draft["values"], draft["template"]),
@@ -1117,7 +1301,7 @@ _ADMIN_JS = """
       tabPanes.forEach(function(p){p.classList.remove('active');});
       btn.classList.add('active');
       document.getElementById('pane-'+btn.dataset.tab).classList.add('active');
-      var noSaveTabs=['pending','broadcast'];
+      var noSaveTabs=['pending','blacklist','broadcast'];
       if(saveBar) saveBar.style.display=noSaveTabs.indexOf(btn.dataset.tab)>=0?'none':'';
     });
   });
@@ -1278,7 +1462,77 @@ _ADMIN_JS = """
     serializeStartBtns();
     serializeKb();
     serializeTemplate();
+    serializePushFields();
   });
+
+  // Push Detail Fields Editor
+  var pushDetailFieldsData=__PUSH_DETAIL_FIELDS__;
+  var pushFieldsList=document.getElementById('push-detail-fields-list');
+  function getTplTextFields(){
+    var fields=[];
+    tplFieldsEl.querySelectorAll('.tpl-field-card').forEach(function(card){
+      var key=card.querySelector('[data-field=key]').value.trim();
+      var label=card.querySelector('[data-field=label]').value.trim();
+      var type=card.querySelector('[data-field=type]').value;
+      if(key&&label&&type!=='photo') fields.push({key:key,label:label});
+    });
+    return fields;
+  }
+  function makePushFieldRow(key,label){
+    var row=document.createElement('div'); row.className='editor-row'; row.dataset.key=key;
+    var span=document.createElement('span');
+    span.textContent=(label||key)+' ('+key+')'; span.style.flex='1';
+    var up=document.createElement('button');
+    up.type='button'; up.textContent='↑'; up.className='btn btn-sm';
+    up.style.cssText='padding:3px 8px;background:#f1f5f9;border:1px solid #e2e8f0;border-radius:4px;cursor:pointer;flex:none;';
+    up.addEventListener('click',function(){var prev=row.previousElementSibling;if(prev)pushFieldsList.insertBefore(row,prev);});
+    var down=document.createElement('button');
+    down.type='button'; down.textContent='↓'; down.className='btn btn-sm';
+    down.style.cssText='padding:3px 8px;background:#f1f5f9;border:1px solid #e2e8f0;border-radius:4px;cursor:pointer;flex:none;';
+    down.addEventListener('click',function(){var next=row.nextElementSibling;if(next)pushFieldsList.insertBefore(next,row);});
+    var rm=document.createElement('button');
+    rm.type='button'; rm.textContent='✕'; rm.className='btn btn-danger btn-sm';
+    rm.addEventListener('click',function(){row.remove();renderPushFieldsAddArea();});
+    row.appendChild(span); row.appendChild(up); row.appendChild(down); row.appendChild(rm);
+    return row;
+  }
+  function renderPushFieldsAddArea(){
+    var addArea=document.getElementById('push-fields-add-area');
+    addArea.innerHTML='';
+    var existingKeys={};
+    pushFieldsList.querySelectorAll('.editor-row[data-key]').forEach(function(r){existingKeys[r.dataset.key]=true;});
+    getTplTextFields().forEach(function(f){
+      if(!existingKeys[f.key]){
+        var btn=document.createElement('button');
+        btn.type='button'; btn.textContent='＋ '+f.label+' ('+f.key+')';
+        btn.className='btn-add'; btn.style.marginTop='4px';
+        btn.addEventListener('click',function(){
+          pushFieldsList.appendChild(makePushFieldRow(f.key,f.label));
+          renderPushFieldsAddArea();
+        });
+        addArea.appendChild(btn);
+      }
+    });
+  }
+  function initPushFields(){
+    pushFieldsList.innerHTML='';
+    var tplFields=getTplTextFields();
+    var labelMap={};
+    tplFields.forEach(function(f){labelMap[f.key]=f.label;});
+    var initKeys=pushDetailFieldsData.length>0?pushDetailFieldsData:tplFields.map(function(f){return f.key;});
+    initKeys.forEach(function(k){
+      if(labelMap[k]) pushFieldsList.appendChild(makePushFieldRow(k,labelMap[k]));
+    });
+    renderPushFieldsAddArea();
+  }
+  function serializePushFields(){
+    var result=[];
+    pushFieldsList.querySelectorAll('.editor-row[data-key]').forEach(function(row){
+      result.push(row.dataset.key);
+    });
+    document.getElementById('push_detail_fields_json').value=JSON.stringify(result);
+  }
+  initPushFields();
 
   // Broadcast Buttons Editor
   var broadcastBtnsRows=document.getElementById('broadcast-btn-rows');
@@ -1336,7 +1590,7 @@ def _render_report_content_for_admin(data_json: str, tpl_fields: list[dict[str, 
     return "<br>".join(parts) if parts else "<em style='color:#94a3b8'>（无内容）</em>"
 
 
-def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] | None = None, saved: bool = False, user_count: int = 0, db_path: str = "") -> str:
+def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] | None = None, saved: bool = False, user_count: int = 0, db_path: str = "", blacklist: list[dict] | None = None) -> str:
     def e(key: str) -> str:
         return html.escape(settings_map.get(key, ""))
 
@@ -1356,12 +1610,14 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
     start_buttons_js = safe_js("start_buttons_json", [])
     kb_buttons_js = safe_js("keyboard_buttons_json", [])
     template_js = safe_js("report_template_json", {"name": "", "fields": []})
+    push_detail_fields_js = safe_js("push_detail_fields_json", [])
 
     js = (
         _ADMIN_JS
         .replace("__START_BUTTONS__", start_buttons_js)
         .replace("__KB_BUTTONS__", kb_buttons_js)
         .replace("__TEMPLATE__", template_js)
+        .replace("__PUSH_DETAIL_FIELDS__", push_detail_fields_js)
     )
 
     pending_count = len(pending_reports) if pending_reports else 0
@@ -1396,6 +1652,33 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
         )
     else:
         pending_html = "<p class='muted'>暂无待审核报告。</p>"
+
+    # Build blacklist HTML
+    if blacklist:
+        bl_rows = ""
+        for entry in blacklist:
+            uid = html.escape(str(entry.get("user_id", "")))
+            uname = html.escape(entry.get("username") or "")
+            reason = html.escape(entry.get("reason") or "")
+            added = html.escape(str(entry.get("added_at", ""))[:19])
+            bl_rows += (
+                "<tr>"
+                f"<td>{uid}</td>"
+                f"<td>{'@' + uname if uname else '<em style=\"color:#94a3b8\">未知</em>'}</td>"
+                f"<td>{reason}</td>"
+                f"<td style='white-space:nowrap'>{added}</td>"
+                "<td>"
+                f"<form method='post' action='/admin/blacklist/unban/{entry['user_id']}'>"
+                "<button class='btn btn-success btn-sm' type='submit'>✅ 解除</button></form>"
+                "</td></tr>"
+            )
+        blacklist_html = (
+            "<table class='table'><thead><tr>"
+            "<th>用户ID</th><th>用户名</th><th>原因</th><th>封禁时间</th><th>操作</th>"
+            "</tr></thead><tbody>" + bl_rows + "</tbody></table>"
+        )
+    else:
+        blacklist_html = "<p class='muted'>黑名单为空。</p>"
 
     saved_banner = "<div class='alert alert-success'>✅ 配置已保存成功！</div>" if saved else ""
 
@@ -1432,6 +1715,7 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
   <button type="button" class="tab-btn" data-tab="texts">文本配置</button>
   <button type="button" class="tab-btn" data-tab="review">审核设置</button>
   <button type="button" class="tab-btn" data-tab="pending">待审核{pending_badge}</button>
+  <button type="button" class="tab-btn" data-tab="blacklist">黑名单</button>
   <button type="button" class="tab-btn" data-tab="broadcast">广播</button>
 </div>
 
@@ -1460,6 +1744,17 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
     <label>数据库路径</label>
     <input type="text" value="{html.escape(db_path)}" readonly style="background:#f5f5f5;color:#888;">
     <div class="hint">⚠️ 当前数据库文件位置。部署在 Railway 等平台时，若未挂载持久化存储卷，重新部署后数据将丢失。请在平台设置中挂载 Volume 并将 <code>DB_PATH</code> 环境变量指向该卷内的路径（如 <code>/data/baogao.db</code>）。</div>
+  </div>
+  <div class="field">
+    <label>配置导出 / 导入</label>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-start">
+      <a href="/admin/export-settings" class="btn btn-primary" style="text-decoration:none;display:inline-block">⬇️ 导出配置 JSON</a>
+      <form method="post" action="/admin/import-settings" style="display:flex;gap:6px;align-items:flex-start;flex-wrap:wrap">
+        <textarea name="settings_json" rows="3" placeholder="粘贴之前导出的配置 JSON..." style="width:300px;min-width:200px;padding:6px 10px;border:1px solid #cbd5e1;border-radius:6px;font-size:.85rem;resize:vertical"></textarea>
+        <button type="submit" class="btn btn-success" onclick="return confirm('导入将覆盖现有配置，确认吗？')">⬆️ 导入配置</button>
+      </form>
+    </div>
+    <div class="hint" style="margin-top:6px">可将当前配置导出为 JSON 文件保存备份；重新部署后可导入恢复设置。</div>
   </div>
 </div>
 
@@ -1548,7 +1843,14 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
   <div class="field">
     <label>推送频道 — 推送模板</label>
     <textarea name="push_template" rows="4">{e('push_template')}</textarea>
-    <div class="hint">审核通过后推送到频道的消息模板，支持：{{id}} 报告编号、{{username}} 用户名、{{detail}} 报告内容、{{link}} 报告链接</div>
+    <div class="hint">支持占位符：{{id}} 报告编号、{{username}} 用户名、{{detail}} 报告字段内容、{{link}} 报告链接。<br>还可直接使用字段键名，如模板含 <code>title</code> 字段则可用 {{{{title}}}}（前后各两个大括号）。</div>
+  </div>
+  <div class="field">
+    <label>推送详情字段 — 顺序与选择</label>
+    <div class="hint" style="margin-bottom:8px">拖动排序或点击 ↑↓ 调整字段在 {{{{detail}}}} 中的显示顺序；点击 ✕ 从推送中排除该字段。留空则默认包含全部文本字段。</div>
+    <div id="push-detail-fields-list"></div>
+    <div id="push-fields-add-area" style="margin-top:8px"></div>
+    <input type="hidden" name="push_detail_fields_json" id="push_detail_fields_json">
   </div>
 </div>
 
@@ -1561,6 +1863,24 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
 <div id="pane-pending" class="tab-pane">
   <p class="section-title">待审核报告（{pending_count} 条）</p>
   {pending_html}
+</div>
+
+<div id="pane-blacklist" class="tab-pane">
+  <p class="section-title">黑名单管理</p>
+  <div style="margin-bottom:16px">
+    <form method="post" action="/admin/blacklist/ban" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+      <div>
+        <label style="font-size:.8rem;font-weight:600;color:#475569;display:block;margin-bottom:4px">用户 ID</label>
+        <input type="text" name="user_id" placeholder="数字用户ID" style="width:140px;padding:6px 10px;border:1px solid #cbd5e1;border-radius:6px;font-size:.9rem">
+      </div>
+      <div>
+        <label style="font-size:.8rem;font-weight:600;color:#475569;display:block;margin-bottom:4px">原因（可选）</label>
+        <input type="text" name="reason" placeholder="限制原因" style="width:200px;padding:6px 10px;border:1px solid #cbd5e1;border-radius:6px;font-size:.9rem">
+      </div>
+      <button type="submit" class="btn btn-danger">🚫 加入黑名单</button>
+    </form>
+  </div>
+  {blacklist_html}
 </div>
 
 <div id="pane-broadcast" class="tab-pane">
@@ -1614,6 +1934,10 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     upsert_user(user.id, user.username)
 
+    if is_user_banned(user.id):
+        await update.message.reply_text("您已被限制使用此机器人。")
+        return
+
     channel = setting_get("force_sub_channel", "").strip()
     if channel and not await is_subscribed(context.bot, user.id):
         rows = [[InlineKeyboardButton("我已订阅，重新检测", callback_data="retry_sub")]]
@@ -1647,12 +1971,16 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         fields = draft["template"]["fields"]
         current_idx = next((i for i, f in enumerate(fields) if f["key"] == key), -1)
         next_idx = current_idx + 1
+        # Delete previous prompt before sending next
+        await _delete_prompt_message(context, draft)
         if next_idx < len(fields):
             next_field = fields[next_idx]
             draft["awaiting"] = next_field["key"]
             draft["sequential"] = True
             prompt, markup = _make_field_prompt(next_field, sequential=True)
-            await update.message.reply_text(prompt, reply_markup=markup)
+            sent = await update.message.reply_text(prompt, reply_markup=markup)
+            draft["prompt_msg_id"] = sent.message_id
+            draft["prompt_chat_id"] = update.effective_chat.id
             return
 
     await update.message.reply_text(
@@ -1679,6 +2007,8 @@ def create_bot_application(token: str) -> Application:
     app.add_handler(CommandHandler("pending", pending_cmd))
     app.add_handler(CommandHandler("approve", approve_cmd))
     app.add_handler(CommandHandler("reject", reject_cmd))
+    app.add_handler(CommandHandler("ban", ban_cmd))
+    app.add_handler(CommandHandler("unban", unban_cmd))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, on_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
@@ -1814,10 +2144,18 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
                 "SELECT id, username, created_at, data_json FROM reports WHERE status = 'pending' ORDER BY id DESC LIMIT 50"
             ).fetchall()
             user_count_row = conn.execute("SELECT COUNT(*) as cnt FROM users").fetchone()
+            blacklist_rows = conn.execute(
+                "SELECT user_id, username, reason, added_at FROM blacklist ORDER BY added_at DESC"
+            ).fetchall()
         settings_map = {r["key"]: r["value"] for r in rows}
         pending_list = [dict(r) for r in pending_rows]
         user_count = user_count_row["cnt"] if user_count_row else 0
-        response = HTMLResponse(build_admin_html(settings_map, pending_list, saved=saved, user_count=user_count, db_path=str(DB_PATH.resolve())))
+        blacklist_list = [dict(r) for r in blacklist_rows]
+        response = HTMLResponse(build_admin_html(
+            settings_map, pending_list, saved=saved,
+            user_count=user_count, db_path=str(DB_PATH.resolve()),
+            blacklist=blacklist_list,
+        ))
         if should_set_cookie:
             response.set_cookie(
                 key="admin_token",
@@ -1842,6 +2180,7 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
         review_rejected_template: str = Form(""),
         push_template: str = Form(""),
         report_template_json: str = Form("{}"),
+        push_detail_fields_json: str = Form("[]"),
         contact_text: str = Form(""),
         usage_text: str = Form(""),
         search_help_text: str = Form(""),
@@ -1853,6 +2192,7 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
             start_buttons_obj = json.loads(start_buttons_json)
             keyboard_buttons_obj = json.loads(keyboard_buttons_json)
             report_template_obj = json.loads(report_template_json)
+            push_detail_fields_obj = json.loads(push_detail_fields_json)
         except json.JSONDecodeError:
             raise HTTPException(status_code=400, detail="JSON 配置格式错误")
         if not isinstance(start_buttons_obj, list):
@@ -1861,6 +2201,8 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
             raise HTTPException(status_code=400, detail="keyboard_buttons_json 必须是数组")
         if not isinstance(report_template_obj, dict):
             raise HTTPException(status_code=400, detail="report_template_json 必须是对象")
+        if not isinstance(push_detail_fields_obj, list):
+            push_detail_fields_obj = []
 
         updates = {
             "force_sub_channel": force_sub_channel.strip(),
@@ -1874,6 +2216,7 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
             "review_rejected_template": review_rejected_template,
             "push_template": push_template,
             "report_template_json": json.dumps(report_template_obj, ensure_ascii=False),
+            "push_detail_fields_json": json.dumps(push_detail_fields_obj, ensure_ascii=False),
             "contact_text": contact_text,
             "usage_text": usage_text,
             "search_help_text": search_help_text,
@@ -1890,6 +2233,160 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
         with db_connection() as conn:
             rows = conn.execute("SELECT key, value FROM settings").fetchall()
         return {r["key"]: r["value"] for r in rows}
+
+    # ---- Admin verification flow (Feature 5) ----
+
+    @web.get("/admin/verify", response_class=HTMLResponse)
+    async def admin_verify_page():
+        _cleanup_verify_state()
+        code = secrets.token_hex(4).upper()  # 8 uppercase hex chars
+        _verify_codes[code] = time.time() + _VERIFY_CODE_TTL
+        return HTMLResponse(f"""<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>管理员验证</title>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f0f2f5;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px}}
+.card{{background:#fff;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,.12);padding:36px 32px;max-width:440px;width:100%;text-align:center}}
+h2{{font-size:1.3rem;color:#1e293b;margin-bottom:8px}}
+p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
+.code-box{{background:#f8fafc;border:2px dashed #93c5fd;border-radius:10px;padding:20px;margin:20px 0;font-size:2rem;font-weight:700;letter-spacing:.3em;color:#2563eb;font-family:monospace}}
+.step{{background:#eff6ff;border-radius:8px;padding:12px 16px;text-align:left;font-size:.85rem;color:#1d4ed8;line-height:1.8;margin-bottom:16px}}
+.waiting{{color:#64748b;font-size:.85rem;margin-top:16px}}
+</style>
+</head>
+<body>
+<div class="card">
+  <h2>🔐 管理员身份验证</h2>
+  <p>为保障安全，请通过 Telegram 机器人完成验证。</p>
+  <div class="step">
+    <b>操作步骤：</b><br>
+    1. 复制下方验证码<br>
+    2. 打开 Telegram 与机器人对话<br>
+    3. 将验证码发送给机器人<br>
+    4. 机器人确认身份后会给您发送登录链接
+  </div>
+  <div class="code-box" id="code-display">{code}</div>
+  <p class="waiting" id="status-msg">⏳ 等待您在 Telegram 中发送验证码…</p>
+</div>
+<script>
+(function(){{
+  var code='{code}';
+  var interval=setInterval(function(){{
+    fetch('/admin/verify/status?code='+encodeURIComponent(code))
+      .then(function(r){{return r.json();}})
+      .then(function(d){{
+        if(d.status==='verified'&&d.redirect){{
+          clearInterval(interval);
+          document.getElementById('status-msg').textContent='✅ 验证成功，正在跳转…';
+          window.location.href=d.redirect;
+        }} else if(d.status==='expired'){{
+          clearInterval(interval);
+          document.getElementById('status-msg').textContent='❌ 验证码已过期，请刷新页面重新获取。';
+        }}
+      }}).catch(function(){{}});
+  }},3000);
+}})();
+</script>
+</body>
+</html>
+""")
+
+    @web.get("/admin/verify/status")
+    async def admin_verify_status(code: str = ""):
+        _cleanup_verify_state()
+        if not code or code not in _verify_codes:
+            return JSONResponse({"status": "expired"})
+        if time.time() > _verify_codes[code]:
+            _verify_codes.pop(code, None)
+            _verify_code_otps.pop(code, None)
+            return JSONResponse({"status": "expired"})
+        otp = _verify_code_otps.get(code)
+        if otp:
+            return JSONResponse({"status": "verified", "redirect": f"/admin/otp?token={otp}"})
+        return JSONResponse({"status": "pending"})
+
+    @web.get("/admin/otp", response_class=HTMLResponse)
+    async def admin_otp_login(request: Request, token: str = ""):
+        _cleanup_verify_state()
+        if not token or token not in _otp_tokens:
+            return HTMLResponse("<html><body style='font-family:sans-serif;padding:40px'>❌ 链接无效或已过期，请重新验证。<br><a href='/admin/verify'>重新验证</a></body></html>", status_code=403)
+        if time.time() > _otp_tokens[token]:
+            _otp_tokens.pop(token, None)
+            return HTMLResponse("<html><body style='font-family:sans-serif;padding:40px'>❌ 登录链接已过期，请重新验证。<br><a href='/admin/verify'>重新验证</a></body></html>", status_code=403)
+        # Consume the token
+        _otp_tokens.pop(token, None)
+        if not config.admin_panel_token:
+            return RedirectResponse(url="/admin", status_code=303)
+        response = RedirectResponse(url="/admin", status_code=303)
+        response.set_cookie(
+            key="admin_token",
+            value=config.admin_panel_token,
+            httponly=True,
+            samesite="lax",
+            secure=_is_secure_request(request),
+        )
+        return response
+
+    # ---- Blacklist web routes ----
+
+    @web.post("/admin/blacklist/ban")
+    async def web_blacklist_ban(request: Request, user_id: str = Form(""), reason: str = Form("")):
+        if redirect := _auth(request):
+            return redirect
+        try:
+            uid = int(user_id.strip())
+        except (ValueError, AttributeError):
+            raise HTTPException(status_code=400, detail="用户ID必须是数字")
+        ban_user(uid, None, reason.strip() or "管理员限制")
+        return RedirectResponse(url="/admin#tab=blacklist", status_code=303)
+
+    @web.post("/admin/blacklist/unban/{user_id}")
+    async def web_blacklist_unban(user_id: int, request: Request):
+        if redirect := _auth(request):
+            return redirect
+        unban_user(user_id)
+        return RedirectResponse(url="/admin#tab=blacklist", status_code=303)
+
+    # ---- Settings export / import ----
+
+    @web.get("/admin/export-settings")
+    async def admin_export_settings(request: Request):
+        if redirect := _auth(request):
+            return redirect
+        with db_connection() as conn:
+            rows = conn.execute("SELECT key, value FROM settings").fetchall()
+        data = {r["key"]: r["value"] for r in rows}
+        content = json.dumps(data, ensure_ascii=False, indent=2)
+        return Response(
+            content=content,
+            media_type="application/json",
+            headers={"Content-Disposition": "attachment; filename=baogao-settings.json"},
+        )
+
+    @web.post("/admin/import-settings")
+    async def admin_import_settings(request: Request, settings_json: str = Form("")):
+        if redirect := _auth(request):
+            return redirect
+        try:
+            data = json.loads(settings_json)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="JSON 格式错误，请检查导入内容")
+        if not isinstance(data, dict):
+            raise HTTPException(status_code=400, detail="JSON 必须是对象格式")
+        allowed_keys = set(DEFAULT_SETTINGS.keys())
+        imported = 0
+        for key, value in data.items():
+            if key in allowed_keys and isinstance(value, str):
+                setting_set(key, value)
+                imported += 1
+        safe_count = html.escape(str(imported))
+        return HTMLResponse(
+            f"<html><body style='font-family:sans-serif;padding:40px'>✅ 成功导入 {safe_count} 项配置。<a href='/admin?saved=1'>返回后台</a></body></html>"
+        )
 
     @web.post("/admin/approve/{report_id}")
     async def web_approve_report(report_id: int, request: Request):
