@@ -35,15 +35,15 @@
 
 `python -m app.main`
 
-> ⚠️ **数据持久化**：Railway 默认使用临时文件系统，**重新部署后数据库文件会丢失**（包括所有管理后台设置、用户记录等）。
-> 解决方法：在 Railway 项目中挂载 **Volume**（持久化存储），并将 `DB_PATH` 环境变量设置为 Volume 内的路径，例如 `/data/baogao.db`。
+> 数据库使用 **PostgreSQL**，数据持久化存储，重新部署不会丢失。
+> 在 Railway 中添加一个 PostgreSQL 插件后，`DATABASE_URL` 环境变量会自动注入，无需额外配置。
 
 ## 环境变量
 
 - `BOT_TOKEN`（必填）Telegram Bot Token
+- `DATABASE_URL`（必填）PostgreSQL 连接 URL，例如 `postgresql://user:pass@host:5432/dbname`
 - `BOT_MODE`（可选，默认 `polling`）
 - `ADMIN_USER_IDS`（可选）管理员 Telegram User ID，逗号分隔
-- `DB_PATH`（可选，默认 `baogao.db`）
 - `ADMIN_PANEL_URL`（建议填写）管理后台外网 URL（建议 `https://xxx.up.railway.app/admin/login`）
 - `ADMIN_PANEL_TOKEN`（建议填写）后台访问令牌（登录后写入 HttpOnly Cookie）
 
@@ -62,5 +62,6 @@ Webhook 额外变量：
 ```bash
 pip install -r requirements.txt
 export BOT_TOKEN=xxxx
+export DATABASE_URL=postgresql://user:pass@localhost:5432/baogao
 python -m app.main
 ```

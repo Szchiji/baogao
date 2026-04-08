@@ -4,7 +4,6 @@ import json
 import logging
 import os
 import secrets
-import sqlite3
 import time
 from contextlib import asynccontextmanager
 from contextlib import contextmanager
@@ -14,6 +13,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+import psycopg2
+import psycopg2.extras
 import uvicorn
 from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -89,7 +90,28 @@ def _record_verify_attempt(user_id: int) -> None:
     _verify_attempts[user_id] = attempts
 
 
-DB_PATH = Path(os.getenv("DB_PATH", "baogao.db"))
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+
+
+class _PGConn:
+    """Thin wrapper that gives psycopg2 the same conn.execute() interface as sqlite3."""
+
+    def __init__(self, raw_conn: Any) -> None:
+        self._conn = raw_conn
+        self._cur = raw_conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+    def execute(self, sql: str, params: tuple = ()) -> Any:
+        self._cur.execute(sql, params)
+        return self._cur
+
+    def commit(self) -> None:
+        self._conn.commit()
+
+    def close(self) -> None:
+        try:
+            self._cur.close()
+        finally:
+            self._conn.close()
 
 DEFAULT_SETTINGS: dict[str, str] = {
     "force_sub_channel": "",
@@ -163,17 +185,21 @@ def load_config() -> AppConfig:
 
 @contextmanager
 def db_connection():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL environment variable is not set")
+    raw = psycopg2.connect(DATABASE_URL)
+    conn = _PGConn(raw)
     try:
         yield conn
         conn.commit()
+    except Exception:
+        raw.rollback()
+        raise
     finally:
         conn.close()
 
 
 def init_db() -> None:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with db_connection() as conn:
         conn.execute(
             """
@@ -186,8 +212,8 @@ def init_db() -> None:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS reports (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              user_id INTEGER NOT NULL,
+              id SERIAL PRIMARY KEY,
+              user_id BIGINT NOT NULL,
               username TEXT,
               tag TEXT,
               data_json TEXT NOT NULL,
@@ -203,14 +229,11 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status, id DESC)"
         )
         # Migration: add channel_message_link column if it does not exist yet
-        try:
-            conn.execute("ALTER TABLE reports ADD COLUMN channel_message_link TEXT")
-        except sqlite3.OperationalError:
-            pass  # column already exists
+        conn.execute("ALTER TABLE reports ADD COLUMN IF NOT EXISTS channel_message_link TEXT")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
-              user_id INTEGER PRIMARY KEY,
+              user_id BIGINT PRIMARY KEY,
               username TEXT,
               first_seen TEXT NOT NULL,
               last_seen TEXT NOT NULL
@@ -220,7 +243,7 @@ def init_db() -> None:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS blacklist (
-              user_id INTEGER PRIMARY KEY,
+              user_id BIGINT PRIMARY KEY,
               username TEXT,
               reason TEXT,
               added_at TEXT NOT NULL
@@ -229,13 +252,13 @@ def init_db() -> None:
         )
         for key, value in DEFAULT_SETTINGS.items():
             conn.execute(
-                "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (key, value)
+                "INSERT INTO settings (key, value) VALUES (%s, %s) ON CONFLICT DO NOTHING", (key, value)
             )
 
 
 def setting_get(key: str, default: str = "") -> str:
     with db_connection() as conn:
-        row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+        row = conn.execute("SELECT value FROM settings WHERE key = %s", (key,)).fetchone()
         return row["value"] if row else default
 
 
@@ -243,7 +266,7 @@ def setting_set(key: str, value: str) -> None:
     with db_connection() as conn:
         conn.execute(
             """
-            INSERT INTO settings (key, value) VALUES (?, ?)
+            INSERT INTO settings (key, value) VALUES (%s, %s)
             ON CONFLICT(key) DO UPDATE SET value = excluded.value
             """,
             (key, value),
@@ -275,7 +298,7 @@ def upsert_user(user_id: int, username: str | None) -> None:
     with db_connection() as conn:
         conn.execute(
             """
-            INSERT INTO users (user_id, username, first_seen, last_seen) VALUES (?, ?, ?, ?)
+            INSERT INTO users (user_id, username, first_seen, last_seen) VALUES (%s, %s, %s, %s)
             ON CONFLICT(user_id) DO UPDATE SET username=excluded.username, last_seen=excluded.last_seen
             """,
             (user_id, username or "", now, now),
@@ -289,7 +312,7 @@ def utc_now_iso() -> str:
 def is_user_banned(user_id: int) -> bool:
     with db_connection() as conn:
         row = conn.execute(
-            "SELECT 1 FROM blacklist WHERE user_id = ?", (user_id,)
+            "SELECT 1 FROM blacklist WHERE user_id = %s", (user_id,)
         ).fetchone()
         return row is not None
 
@@ -299,7 +322,7 @@ def ban_user(user_id: int, username: str | None, reason: str) -> None:
     with db_connection() as conn:
         conn.execute(
             """
-            INSERT INTO blacklist (user_id, username, reason, added_at) VALUES (?, ?, ?, ?)
+            INSERT INTO blacklist (user_id, username, reason, added_at) VALUES (%s, %s, %s, %s)
             ON CONFLICT(user_id) DO UPDATE SET
               username=excluded.username,
               reason=excluded.reason,
@@ -311,7 +334,7 @@ def ban_user(user_id: int, username: str | None, reason: str) -> None:
 
 def unban_user(user_id: int) -> None:
     with db_connection() as conn:
-        conn.execute("DELETE FROM blacklist WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM blacklist WHERE user_id = %s", (user_id,))
 
 def keyboard_config() -> list[dict[str, str]]:
     items = parse_json(setting_get("keyboard_buttons_json"), [])
@@ -646,7 +669,7 @@ async def query_reports(text: str) -> str:
                 """
                 SELECT id, username, tag, data_json, created_at, channel_message_link
                 FROM reports
-                WHERE status = 'approved' AND username = ?
+                WHERE status = 'approved' AND username = %s
                 ORDER BY id DESC LIMIT 10
                 """,
                 (username,),
@@ -657,7 +680,7 @@ async def query_reports(text: str) -> str:
                 """
                 SELECT id, username, tag, data_json, created_at, channel_message_link
                 FROM reports
-                WHERE status = 'approved' AND tag = ?
+                WHERE status = 'approved' AND tag = %s
                 ORDER BY id DESC LIMIT 10
                 """,
                 (text,),
@@ -734,7 +757,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         context.user_data.pop("pending_reject_id", None)
         reason = text
         with db_connection() as conn:
-            report = conn.execute("SELECT * FROM reports WHERE id = ?", (pending_reject_id,)).fetchone()
+            report = conn.execute("SELECT * FROM reports WHERE id = %s", (pending_reject_id,)).fetchone()
             if not report:
                 await update.message.reply_text("报告不存在。")
                 return
@@ -742,7 +765,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 await update.message.reply_text(f"报告已处于 {report['status']} 状态，无法驳回。")
                 return
             conn.execute(
-                "UPDATE reports SET status='rejected', review_feedback=?, reviewed_at=? WHERE id = ?",
+                "UPDATE reports SET status='rejected', review_feedback=%s, reviewed_at=%s WHERE id = %s",
                 (reason, utc_now_iso(), pending_reject_id),
             )
         tpl = (
@@ -804,11 +827,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 _verify_code_otps[text] = otp
                 base_url = (context.bot_data.get("admin_panel_url") or setting_get("admin_panel_url")).strip()
                 if base_url:
-                    login_url = f"{base_url.rstrip('/')}/admin/otp?token={otp}"
-                    await update.message.reply_text(
-                        f"✅ 身份验证成功！请点击以下链接登录后台（{_OTP_TOKEN_TTL // 60} 分钟内有效）：\n{login_url}",
-                        disable_web_page_preview=True,
-                    )
+                    await update.message.reply_text(f"✅ 身份验证成功！后台页面将自动跳转，请在 {_OTP_TOKEN_TTL // 60} 分钟内返回浏览器。")
                 else:
                     await update.message.reply_text("✅ 验证成功，但未配置 ADMIN_PANEL_URL。")
             else:
@@ -869,7 +888,8 @@ async def submit_report(context: ContextTypes.DEFAULT_TYPE, update: Update) -> N
         cur = conn.execute(
             """
             INSERT INTO reports (user_id, username, tag, data_json, status, created_at)
-            VALUES (?, ?, ?, ?, 'pending', ?)
+            VALUES (%s, %s, %s, %s, 'pending', %s)
+            RETURNING id
             """,
             (
                 update.effective_user.id,
@@ -879,7 +899,7 @@ async def submit_report(context: ContextTypes.DEFAULT_TYPE, update: Update) -> N
                 utc_now_iso(),
             ),
         )
-        report_id = cur.lastrowid
+        report_id = cur.fetchone()["id"]
     context.user_data.pop("report_draft", None)
     await update.effective_chat.send_message(f"✅ 报告 #{report_id} 已提交，等待审核。")
 
@@ -953,7 +973,7 @@ def _build_channel_message_link(channel: str, message_id: int) -> str:
     return f"https://t.me/{channel}/{message_id}"
 
 
-async def _push_report_to_channel(bot: Bot, report_id: int, report: sqlite3.Row) -> str:
+async def _push_report_to_channel(bot: Bot, report_id: int, report: dict) -> str:
     """Push *report* to the configured channel.  Returns the channel message link (or '')."""
     push_channel = setting_get("push_channel", "").strip()
     if not push_channel:
@@ -1002,7 +1022,7 @@ async def _push_report_to_channel(bot: Bot, report_id: int, report: sqlite3.Row)
         if channel_link:
             with db_connection() as conn:
                 conn.execute(
-                    "UPDATE reports SET channel_message_link=? WHERE id=?",
+                    "UPDATE reports SET channel_message_link=%s WHERE id=%s",
                     (channel_link, report_id),
                 )
         return channel_link
@@ -1042,12 +1062,12 @@ async def approve_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text("报告ID必须是数字。")
         return
     with db_connection() as conn:
-        report = conn.execute("SELECT * FROM reports WHERE id = ?", (report_id,)).fetchone()
+        report = conn.execute("SELECT * FROM reports WHERE id = %s", (report_id,)).fetchone()
         if not report:
             await update.message.reply_text("报告不存在。")
             return
         conn.execute(
-            "UPDATE reports SET status='approved', reviewed_at=? WHERE id = ?",
+            "UPDATE reports SET status='approved', reviewed_at=%s WHERE id = %s",
             (utc_now_iso(), report_id),
         )
     await update.message.reply_text(f"报告 #{report_id} 已通过。")
@@ -1071,12 +1091,12 @@ async def reject_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     reason = " ".join(context.args[1:]).strip() or "请联系管理员"
     with db_connection() as conn:
-        report = conn.execute("SELECT * FROM reports WHERE id = ?", (report_id,)).fetchone()
+        report = conn.execute("SELECT * FROM reports WHERE id = %s", (report_id,)).fetchone()
         if not report:
             await update.message.reply_text("报告不存在。")
             return
         conn.execute(
-            "UPDATE reports SET status='rejected', review_feedback=?, reviewed_at=? WHERE id = ?",
+            "UPDATE reports SET status='rejected', review_feedback=%s, reviewed_at=%s WHERE id = %s",
             (reason, utc_now_iso(), report_id),
         )
     tpl = (
@@ -1208,7 +1228,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await query.answer("无效的报告ID。", show_alert=True)
             return
         with db_connection() as conn:
-            report = conn.execute("SELECT * FROM reports WHERE id = ?", (report_id,)).fetchone()
+            report = conn.execute("SELECT * FROM reports WHERE id = %s", (report_id,)).fetchone()
             if not report:
                 await query.answer("报告不存在。", show_alert=True)
                 return
@@ -1216,7 +1236,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 await query.answer(f"报告已处于 {report['status']} 状态。", show_alert=True)
                 return
             conn.execute(
-                "UPDATE reports SET status='approved', reviewed_at=? WHERE id = ?",
+                "UPDATE reports SET status='approved', reviewed_at=%s WHERE id = %s",
                 (utc_now_iso(), report_id),
             )
         await query.answer("已通过。")
@@ -1240,7 +1260,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await query.answer("无效的报告ID。", show_alert=True)
             return
         with db_connection() as conn:
-            report = conn.execute("SELECT * FROM reports WHERE id = ?", (report_id,)).fetchone()
+            report = conn.execute("SELECT * FROM reports WHERE id = %s", (report_id,)).fetchone()
         if not report:
             await query.answer("报告不存在。", show_alert=True)
             return
@@ -1256,7 +1276,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await query.answer()
 
 
-def report_to_html(report_row: sqlite3.Row) -> str:
+def report_to_html(report_row: dict) -> str:
     data = parse_json(report_row["data_json"], {})
     lines = [f"<h1>报告 #{report_row['id']}</h1>"]
     lines.append(f"<p>状态：{report_row['status']}</p>")
@@ -1316,6 +1336,16 @@ textarea{resize:vertical;min-height:70px}
 .tpl-field-card{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;margin-bottom:10px;overflow:hidden}
 .tpl-field-card .editor-row{background:transparent;border:none;border-radius:0;margin-bottom:0}
 @media(max-width:600px){.field-row{grid-template-columns:1fr}}
+.rte-wrap{border:1px solid #cbd5e1;border-radius:6px;overflow:hidden;background:#fff}
+.rte-wrap:focus-within{border-color:#2563eb;box-shadow:0 0 0 3px rgba(37,99,235,.1)}
+.rte-toolbar{display:flex;flex-wrap:wrap;gap:2px;padding:5px 8px;background:#f8fafc;border-bottom:1px solid #e2e8f0}
+.rte-btn{padding:3px 8px;border:1px solid transparent;border-radius:4px;background:none;cursor:pointer;font-size:.85rem;font-family:inherit;color:#374151;transition:all .1s;line-height:1.4}
+.rte-btn:hover{background:#e5e7eb;border-color:#d1d5db}
+.rte-body{padding:8px 10px;min-height:70px;outline:none;font-size:.9rem;line-height:1.6;font-family:inherit;word-break:break-word}
+.rte-body:empty:before{content:attr(data-ph);color:#94a3b8;pointer-events:none;display:block}
+.rte-pills{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px}
+.rte-pill{padding:3px 10px;background:#eff6ff;color:#2563eb;border:1px solid #bfdbfe;border-radius:12px;cursor:pointer;font-size:.8rem;transition:all .15s;font-family:inherit}
+.rte-pill:hover{background:#dbeafe;border-color:#93c5fd}
 """
 
 _ADMIN_JS = """
@@ -1331,6 +1361,8 @@ _ADMIN_JS = """
       document.getElementById('pane-'+btn.dataset.tab).classList.add('active');
       var noSaveTabs=['pending','blacklist','broadcast'];
       if(saveBar) saveBar.style.display=noSaveTabs.indexOf(btn.dataset.tab)>=0?'none':'';
+      if(btn.dataset.tab==='review'&&_rteMap['push_template'])_rteMap['push_template'].refreshPills();
+      if(btn.dataset.tab==='broadcast'&&_rteMap['broadcast_text'])_rteMap['broadcast_text'].refreshPills();
     });
   });
 
@@ -1487,6 +1519,7 @@ _ADMIN_JS = """
   }
 
   document.getElementById('settings-form').addEventListener('submit',function(){
+    Object.keys(_rteMap).forEach(function(k){if(_rteMap[k])_rteMap[k].sync();});
     serializeStartBtns();
     serializeKb();
     serializeTemplate();
@@ -1562,6 +1595,107 @@ _ADMIN_JS = """
   }
   initPushFields();
 
+  // Rich Text Editor
+  function serializeRTENode(node){
+    var out='';
+    node.childNodes.forEach(function(n){
+      if(n.nodeType===3){
+        out+=n.textContent.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      } else if(n.nodeType===1){
+        var t=n.tagName.toLowerCase();
+        var inner=serializeRTENode(n);
+        if(t==='b'||t==='strong') out+='<b>'+inner+'</b>';
+        else if(t==='i'||t==='em') out+='<i>'+inner+'</i>';
+        else if(t==='u') out+='<u>'+inner+'</u>';
+        else if(t==='s'||t==='strike'||t==='del') out+='<s>'+inner+'</s>';
+        else if(t==='code') out+='<code>'+inner+'</code>';
+        else if(t==='a'){var href=(n.getAttribute('href')||'').replace(/"/g,'&quot;');out+='<a href="'+href+'">'+inner+'</a>';}
+        else if(t==='br') out+='\n';
+        else if(t==='div'||t==='p') out+=(inner||'')+'\n';
+        else out+=inner;
+      }
+    });
+    return out;
+  }
+  var _rteMap={};
+  function RichTextEditor(ta,getPills){
+    var self=this; self._ta=ta; self._getPills=getPills||null; self._pd=null;
+    var wrap=document.createElement('div'); wrap.className='rte-wrap';
+    ta.parentNode.insertBefore(wrap,ta); ta.style.display='none';
+    if(getPills){var pd=document.createElement('div');pd.className='rte-pills';wrap.appendChild(pd);self._pd=pd;}
+    var tb=document.createElement('div'); tb.className='rte-toolbar'; wrap.appendChild(tb);
+    var body=document.createElement('div'); body.className='rte-body'; body.contentEditable='true';
+    body.setAttribute('data-ph',ta.getAttribute('placeholder')||'输入内容…');
+    var existing=ta.value; if(existing) body.innerHTML=existing.replace(/\n/g,'<br>');
+    wrap.appendChild(body); self._body=body;
+    var tools=[
+      {cmd:'bold',html:'<b>B</b>',title:'粗体'},
+      {cmd:'italic',html:'<i>I</i>',title:'斜体'},
+      {cmd:'underline',html:'<u>U</u>',title:'下划线'},
+      {cmd:'strikeThrough',html:'<s>S</s>',title:'删除线'},
+      {cmd:'code',html:'<code style="font-size:.8rem">&lt;/&gt;</code>',title:'代码'},
+      {cmd:'link',html:'🔗',title:'添加链接'},
+      {cmd:'unlink',html:'🔗✕',title:'移除链接'},
+      {cmd:'undo',html:'↩',title:'撤销'},
+      {cmd:'redo',html:'↪',title:'重做'}
+    ];
+    tools.forEach(function(t){
+      var btn=document.createElement('button'); btn.type='button';
+      btn.innerHTML=t.html; btn.title=t.title; btn.className='rte-btn';
+      btn.addEventListener('mousedown',function(e){
+        e.preventDefault(); body.focus();
+        if(t.cmd==='code'){
+          var sel=window.getSelection();
+          if(sel&&sel.rangeCount>0&&!sel.isCollapsed){
+            var range=sel.getRangeAt(0);
+            var codeEl=document.createElement('code');
+            try{range.surroundContents(codeEl);}catch(ex){var et=range.toString().replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');document.execCommand('insertHTML',false,'<code>'+et+'</code>');}
+          } else {document.execCommand('insertHTML',false,'<code></code>');}
+        } else if(t.cmd==='link'){
+          var sel=window.getSelection(); var st=sel?sel.toString():'';
+          var url=prompt('输入链接地址（https://...）','');
+          if(url){
+            if(st){document.execCommand('createLink',false,url);}
+            else{var su=url.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');document.execCommand('insertHTML',false,'<a href="'+su+'">'+su+'</a>');}
+          }
+        } else if(t.cmd==='unlink'){document.execCommand('unlink');}
+        else if(t.cmd==='undo'){document.execCommand('undo');}
+        else if(t.cmd==='redo'){document.execCommand('redo');}
+        else{document.execCommand(t.cmd);}
+      });
+      tb.appendChild(btn);
+    });
+    self.sync=function(){var raw=serializeRTENode(body);self._ta.value=raw.replace(/\n+$/,'');};
+    self.refreshPills=function(){
+      if(!self._pd||!self._getPills)return;
+      var pills=self._getPills(); self._pd.innerHTML='';
+      pills.forEach(function(p){
+        var btn=document.createElement('button'); btn.type='button'; btn.className='rte-pill';
+        btn.textContent=p.label; btn.title='插入: '+p.insert;
+        btn.addEventListener('click',function(){body.focus();document.execCommand('insertText',false,p.insert);});
+        self._pd.appendChild(btn);
+      });
+    };
+  }
+  function getPushTemplatePills(){
+    var pills=[{label:'报告ID',insert:'{id}'},{label:'用户名',insert:'{username}'},{label:'推送详情',insert:'{detail}'},{label:'报告链接',insert:'{link}'}];
+    getTplTextFields().forEach(function(f){pills.push({label:f.label,insert:'{'+f.key+'}'});});
+    return pills;
+  }
+  function getBroadcastPills(){
+    var pills=[];
+    getTplTextFields().forEach(function(f){pills.push({label:f.label,insert:'{'+f.key+'}'});});
+    return pills;
+  }
+  ['start_text','search_help_text','contact_text','usage_text'].forEach(function(name){
+    var ta=document.querySelector('[name="'+name+'"]');
+    if(ta) _rteMap[name]=new RichTextEditor(ta,null);
+  });
+  var ptTa=document.querySelector('[name="push_template"]');
+  if(ptTa){_rteMap['push_template']=new RichTextEditor(ptTa,getPushTemplatePills);_rteMap['push_template'].refreshPills();}
+  var btTa=document.querySelector('[name="broadcast_text"]');
+  if(btTa){_rteMap['broadcast_text']=new RichTextEditor(btTa,getBroadcastPills);_rteMap['broadcast_text'].refreshPills();}
+
   // Broadcast Buttons Editor
   var broadcastBtnsRows=document.getElementById('broadcast-btn-rows');
   if(broadcastBtnsRows){
@@ -1592,6 +1726,7 @@ _ADMIN_JS = """
       document.getElementById('broadcast_buttons_json').value=JSON.stringify(result);
     }
     document.getElementById('broadcast-form').addEventListener('submit',function(){
+      if(_rteMap['broadcast_text'])_rteMap['broadcast_text'].sync();
       serializeBroadcastBtns();
       return confirm('确认向所有用户发送广播？');
     });
@@ -1769,9 +1904,9 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
     <div class="hint">报告查询结果显示链接的前缀，链接格式为：域名/reports/ID（留空则仅显示报告 ID）；当推送到频道时会自动使用频道消息链接，无需另行配置</div>
   </div>
   <div class="field">
-    <label>数据库路径</label>
-    <input type="text" value="{html.escape(db_path)}" readonly style="background:#f5f5f5;color:#888;">
-    <div class="hint">⚠️ 当前数据库文件位置。部署在 Railway 等平台时，若未挂载持久化存储卷，重新部署后数据将丢失。请在平台设置中挂载 Volume 并将 <code>DB_PATH</code> 环境变量指向该卷内的路径（如 <code>/data/baogao.db</code>）。</div>
+    <label>数据库</label>
+    <input type="text" value="PostgreSQL (DATABASE_URL)" readonly style="background:#f5f5f5;color:#888;">
+    <div class="hint">数据库使用 PostgreSQL，数据持久化存储，重新部署不会丢失。请确保在平台环境变量中设置 <code>DATABASE_URL</code>。</div>
   </div>
   <div class="field">
     <label>配置导出 / 导入</label>
@@ -1791,7 +1926,7 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
   <div class="field">
     <label>/start 欢迎文本</label>
     <textarea name="start_text" rows="4">{e('start_text')}</textarea>
-    <div class="hint">支持 HTML 格式：&lt;b&gt;加粗&lt;/b&gt;、&lt;i&gt;斜体&lt;/i&gt;、&lt;a href="..."&gt;链接&lt;/a&gt;</div>
+    <div class="hint">使用工具栏进行格式化；支持 Telegram HTML：加粗、斜体、下划线、链接等</div>
   </div>
   <div class="field-row">
     <div class="field">
@@ -1871,7 +2006,7 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
   <div class="field">
     <label>推送频道 — 推送模板</label>
     <textarea name="push_template" rows="4">{e('push_template')}</textarea>
-    <div class="hint">支持占位符：{{id}} 报告编号、{{username}} 用户名、{{detail}} 报告字段内容、{{link}} 报告链接。<br>还可直接使用字段键名，如模板含 <code>title</code> 字段则可用 {{{{title}}}}（前后各两个大括号）。</div>
+    <div class="hint">支持占位符：{{id}} 报告编号、{{username}} 用户名、{{detail}} 报告字段内容、{{link}} 报告链接；点击上方字段按钮快速插入。<br>还可直接使用字段键名，如模板含 <code>title</code> 字段则可用 {{{{title}}}}（前后各两个大括号）。</div>
   </div>
   <div class="field">
     <label>推送详情字段 — 顺序与选择</label>
@@ -1916,7 +2051,7 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
   <form id="broadcast-form" method="post" action="/admin/broadcast">
     <div class="field">
       <label>广播文本</label>
-      <textarea name="broadcast_text" rows="5" placeholder="支持 HTML 格式：&lt;b&gt;加粗&lt;/b&gt;、&lt;i&gt;斜体&lt;/i&gt;、&lt;a href='...'&gt;链接&lt;/a&gt;"></textarea>
+      <textarea name="broadcast_text" rows="5" placeholder="使用工具栏格式化文字；点击字段按钮快速插入模板字段内容"></textarea>
     </div>
     <div class="field-row">
       <div class="field">
@@ -2104,7 +2239,7 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
     async def report_detail(report_id: int):
         with db_connection() as conn:
             row = conn.execute(
-                "SELECT * FROM reports WHERE id = ? AND status = 'approved'", (report_id,)
+                "SELECT * FROM reports WHERE id = %s AND status = 'approved'", (report_id,)
             ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="report not found")
@@ -2181,7 +2316,7 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
         blacklist_list = [dict(r) for r in blacklist_rows]
         response = HTMLResponse(build_admin_html(
             settings_map, pending_list, saved=saved,
-            user_count=user_count, db_path=str(DB_PATH.resolve()),
+            user_count=user_count, db_path="",
             blacklist=blacklist_list,
         ))
         if should_set_cookie:
@@ -2295,7 +2430,7 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
     1. 复制下方验证码<br>
     2. 打开 Telegram 与机器人对话<br>
     3. 将验证码发送给机器人<br>
-    4. 机器人确认身份后会给您发送登录链接
+    4. 机器人确认后，此页面将自动跳转到后台
   </div>
   <div class="code-box" id="code-display">{code}</div>
   <p class="waiting" id="status-msg">⏳ 等待您在 Telegram 中发送验证码…</p>
@@ -2421,13 +2556,13 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
         if redirect := _auth(request):
             return redirect
         with db_connection() as conn:
-            report = conn.execute("SELECT * FROM reports WHERE id = ?", (report_id,)).fetchone()
+            report = conn.execute("SELECT * FROM reports WHERE id = %s", (report_id,)).fetchone()
             if not report:
                 raise HTTPException(status_code=404, detail="报告不存在")
             if report["status"] != "pending":
                 raise HTTPException(status_code=400, detail=f"报告已处于 {report['status']} 状态")
             conn.execute(
-                "UPDATE reports SET status='approved', reviewed_at=? WHERE id = ?",
+                "UPDATE reports SET status='approved', reviewed_at=%s WHERE id = %s",
                 (utc_now_iso(), report_id),
             )
         try:
@@ -2448,13 +2583,13 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
         if redirect := _auth(request):
             return redirect
         with db_connection() as conn:
-            report = conn.execute("SELECT * FROM reports WHERE id = ?", (report_id,)).fetchone()
+            report = conn.execute("SELECT * FROM reports WHERE id = %s", (report_id,)).fetchone()
             if not report:
                 raise HTTPException(status_code=404, detail="报告不存在")
             if report["status"] != "pending":
                 raise HTTPException(status_code=400, detail=f"报告已处于 {report['status']} 状态")
             conn.execute(
-                "UPDATE reports SET status='rejected', review_feedback=?, reviewed_at=? WHERE id = ?",
+                "UPDATE reports SET status='rejected', review_feedback=%s, reviewed_at=%s WHERE id = %s",
                 (reason.strip() or "请联系管理员", utc_now_iso(), report_id),
             )
         tpl = (
