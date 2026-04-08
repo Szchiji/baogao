@@ -2154,9 +2154,27 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def ptb_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    upd = update
+    update_id = getattr(upd, "update_id", None)
+    user_id = None
+    chat_id = None
+    message_text = None
+    callback_data = None
+    if hasattr(upd, "effective_user") and upd.effective_user:  # type: ignore[union-attr]
+        user_id = upd.effective_user.id  # type: ignore[union-attr]
+    if hasattr(upd, "effective_chat") and upd.effective_chat:  # type: ignore[union-attr]
+        chat_id = upd.effective_chat.id  # type: ignore[union-attr]
+    if hasattr(upd, "message") and upd.message:  # type: ignore[union-attr]
+        message_text = getattr(upd.message, "text", None)  # type: ignore[union-attr]
+    if hasattr(upd, "callback_query") and upd.callback_query:  # type: ignore[union-attr]
+        callback_data = getattr(upd.callback_query, "data", None)  # type: ignore[union-attr]
     logger.error(
-        "handler exception for update %r: %s",
-        update,
+        "handler exception: update_id=%s user_id=%s chat_id=%s message_text=%r callback_data=%r error=%s",
+        update_id,
+        user_id,
+        chat_id,
+        message_text,
+        callback_data,
         context.error,
         exc_info=context.error,
     )
