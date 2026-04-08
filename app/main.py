@@ -2154,20 +2154,19 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def ptb_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    upd = update
-    update_id = getattr(upd, "update_id", None)
+    update_id = getattr(update, "update_id", None)
     user_id = None
     chat_id = None
     message_text = None
     callback_data = None
-    if hasattr(upd, "effective_user") and upd.effective_user:  # type: ignore[union-attr]
-        user_id = upd.effective_user.id  # type: ignore[union-attr]
-    if hasattr(upd, "effective_chat") and upd.effective_chat:  # type: ignore[union-attr]
-        chat_id = upd.effective_chat.id  # type: ignore[union-attr]
-    if hasattr(upd, "message") and upd.message:  # type: ignore[union-attr]
-        message_text = getattr(upd.message, "text", None)  # type: ignore[union-attr]
-    if hasattr(upd, "callback_query") and upd.callback_query:  # type: ignore[union-attr]
-        callback_data = getattr(upd.callback_query, "data", None)  # type: ignore[union-attr]
+    if hasattr(update, "effective_user") and update.effective_user:  # type: ignore[union-attr]
+        user_id = update.effective_user.id  # type: ignore[union-attr]
+    if hasattr(update, "effective_chat") and update.effective_chat:  # type: ignore[union-attr]
+        chat_id = update.effective_chat.id  # type: ignore[union-attr]
+    if hasattr(update, "message") and update.message:  # type: ignore[union-attr]
+        message_text = getattr(update.message, "text", None)  # type: ignore[union-attr]
+    if hasattr(update, "callback_query") and update.callback_query:  # type: ignore[union-attr]
+        callback_data = getattr(update.callback_query, "data", None)  # type: ignore[union-attr]
     logger.error(
         "handler exception: update_id=%s user_id=%s chat_id=%s message_text=%r callback_data=%r error=%s",
         update_id,
