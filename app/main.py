@@ -269,8 +269,8 @@ def report_template() -> dict[str, Any]:
     return {"name": str(data.get("name", "模板")), "fields": valid_fields}
 
 
-def _make_field_prompt(field: dict[str, Any], sequential: bool = True) -> tuple[str, "InlineKeyboardMarkup | None"]:
-    """Return (prompt_text, optional_skip_markup) for prompting a field value."""
+def _make_field_prompt(field: dict[str, Any], sequential: bool = True) -> tuple[str, "InlineKeyboardMarkup"]:
+    """Return (prompt_text, markup) for prompting a field value. Always includes a cancel button."""
     label = field["label"]
     hint = field.get("hint", "")
     field_type = field.get("type", "text")
@@ -284,13 +284,12 @@ def _make_field_prompt(field: dict[str, Any], sequential: bool = True) -> tuple[
     if hint:
         prompt += f"\n\n💡 {hint}"
 
-    markup = None
+    buttons: list[list[InlineKeyboardButton]] = []
     if not required and sequential:
         prompt += "\n\n（此项为可选，可跳过不填写）"
-        markup = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("⏭ 跳过此项", callback_data=f"skip_field:{field['key']}")]]
-        )
-    return prompt, markup
+        buttons.append([InlineKeyboardButton("⏭ 跳过此项", callback_data=f"skip_field:{field['key']}")])
+    buttons.append([InlineKeyboardButton("❌ 取消填写", callback_data="cancel_report")])
+    return prompt, InlineKeyboardMarkup(buttons)
 
 
 async def is_subscribed(bot: Bot, user_id: int) -> bool:
@@ -394,6 +393,16 @@ def report_fill_keyboard(values: dict[str, str], template: dict[str, Any]) -> In
         buttons.append([InlineKeyboardButton(f"{done}填写 {label}", callback_data=f"fill:{key}")])
     buttons.append([InlineKeyboardButton("提交审核", callback_data="submit_report")])
     return InlineKeyboardMarkup(buttons)
+
+
+def _report_submit_keyboard() -> InlineKeyboardMarkup:
+    """Return a keyboard with only Submit and Cancel buttons for the final report preview."""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ 提交审核", callback_data="submit_report"),
+            InlineKeyboardButton("❌ 取消", callback_data="cancel_report"),
+        ]
+    ])
 
 
 def get_admin_user_ids() -> list[int]:
@@ -653,7 +662,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(
             render_report_preview(draft["values"], draft["template"]),
             parse_mode=ParseMode.HTML,
-            reply_markup=report_fill_keyboard(draft["values"], draft["template"]),
+            reply_markup=_report_submit_keyboard(),
         )
         return
 
@@ -739,6 +748,16 @@ async def submit_report(context: ContextTypes.DEFAULT_TYPE, update: Update) -> N
                     parse_mode=ParseMode.HTML,
                     reply_markup=review_buttons,
                 )
+                # Also send photo fields so the admin can review images
+                for field in template["fields"]:
+                    if field.get("type") == "photo":
+                        photo_file_id = values.get(field["key"])
+                        if photo_file_id:
+                            await context.bot.send_photo(
+                                chat_id=admin_id,
+                                photo=photo_file_id,
+                                caption=f"📷 {html.escape(field['label'])}（报告 #{report_id}）",
+                            )
             except Exception:
                 logger.warning(
                     "failed to notify admin %s about report %s", admin_id, report_id, exc_info=True
@@ -915,6 +934,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await query.message.reply_text("检测失败，请确认订阅后重试。")
         return
 
+    if data == "cancel_report":
+        await query.answer()
+        context.user_data.pop("report_draft", None)
+        await query.message.reply_text("❌ 已取消填写报告。")
+        return
+
     draft = context.user_data.get("report_draft")
     if data.startswith("fill:"):
         await query.answer()
@@ -928,8 +953,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         draft["awaiting"] = key
         draft["sequential"] = False
-        prompt, _ = _make_field_prompt(field, sequential=False)
-        await query.message.reply_text(prompt)
+        prompt, markup = _make_field_prompt(field, sequential=False)
+        await query.message.reply_text(prompt, reply_markup=markup)
         return
 
     if data.startswith("skip_field:"):
@@ -952,7 +977,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await query.message.reply_text(
                 render_report_preview(draft["values"], draft["template"]),
                 parse_mode=ParseMode.HTML,
-                reply_markup=report_fill_keyboard(draft["values"], draft["template"]),
+                reply_markup=_report_submit_keyboard(),
             )
         return
 
@@ -1293,6 +1318,24 @@ _ADMIN_JS = """
 """
 
 
+def _render_report_content_for_admin(data_json: str, tpl_fields: list[dict[str, Any]]) -> str:
+    """Return a short HTML snippet showing all field values of a report for admin review."""
+    data = parse_json(data_json, {})
+    if not data:
+        return "<em style='color:#94a3b8'>（无内容）</em>"
+    field_labels = {f["key"]: f["label"] for f in tpl_fields}
+    field_types = {f["key"]: f.get("type", "text") for f in tpl_fields}
+    parts = []
+    for k, v in data.items():
+        label = html.escape(field_labels.get(k, k))
+        if field_types.get(k, "text") == "photo":
+            parts.append(f"<b>{label}</b>：📷（图片，请在Telegram通知中查看）")
+        else:
+            display = html.escape(str(v)[:300])
+            parts.append(f"<b>{label}</b>：{display}")
+    return "<br>".join(parts) if parts else "<em style='color:#94a3b8'>（无内容）</em>"
+
+
 def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] | None = None, saved: bool = False, user_count: int = 0, db_path: str = "") -> str:
     def e(key: str) -> str:
         return html.escape(settings_map.get(key, ""))
@@ -1325,23 +1368,30 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
     pending_badge = f'<span class="badge">{pending_count}</span>' if pending_count > 0 else ""
 
     if pending_reports:
-        rows_html = "".join(
-            "<tr>"
-            f"<td>#{r['id']}</td>"
-            f"<td>@{html.escape(r['username'] or 'unknown')}</td>"
-            f"<td>{html.escape(r['created_at'])}</td>"
-            "<td>"
-            f"<form method='post' action='/admin/approve/{r['id']}' style='display:inline'>"
-            "<button class='btn btn-success btn-sm' type='submit'>✅ 通过</button></form> "
-            f"<form method='post' action='/admin/reject/{r['id']}' style='display:inline'>"
-            "<input name='reason' placeholder='驳回原因' required>"
-            "<button class='btn btn-danger btn-sm' type='submit'>❌ 驳回</button></form>"
-            "</td></tr>"
-            for r in pending_reports
-        )
+        tpl_fields = report_template()["fields"]
+        rows_html = ""
+        for r in pending_reports:
+            content_html = _render_report_content_for_admin(r.get("data_json", "{}"), tpl_fields)
+            rows_html += (
+                "<tr>"
+                f"<td>#{r['id']}</td>"
+                f"<td>@{html.escape(r['username'] or 'unknown')}</td>"
+                f"<td style='white-space:nowrap'>{html.escape(str(r['created_at'])[:19])}</td>"
+                f"<td style='max-width:320px;word-break:break-word;font-size:.85rem;line-height:1.6'>{content_html}</td>"
+                "<td style='white-space:nowrap;vertical-align:middle'>"
+                f"<form method='post' action='/admin/approve/{r['id']}' style='display:block;margin-bottom:6px'>"
+                "<button class='btn btn-success btn-sm' type='submit'>✅ 通过</button></form>"
+                f"<form method='post' action='/admin/reject/{r['id']}' style='display:flex;gap:4px;align-items:center'>"
+                "<input name='reason' placeholder='驳回原因' style='width:110px;padding:4px 6px;border:1px solid #cbd5e1;border-radius:4px;font-size:.8rem'>"
+                "<button class='btn btn-danger btn-sm' type='submit'>❌ 驳回</button></form>"
+                "</td></tr>"
+            )
         pending_html = (
+            "<div style='margin-bottom:12px'>"
+            "<a href='/admin#tab=pending' onclick='location.reload();return false;' style='font-size:.85rem;color:#2563eb;text-decoration:none'>🔄 刷新列表</a>"
+            "</div>"
             "<table class='table'><thead><tr>"
-            "<th>ID</th><th>用户</th><th>提交时间</th><th>操作</th>"
+            "<th>ID</th><th>用户</th><th>提交时间</th><th>报告内容</th><th>操作</th>"
             "</tr></thead><tbody>" + rows_html + "</tbody></table>"
         )
     else:
@@ -1608,7 +1658,7 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         render_report_preview(draft["values"], draft["template"]),
         parse_mode=ParseMode.HTML,
-        reply_markup=report_fill_keyboard(draft["values"], draft["template"]),
+        reply_markup=_report_submit_keyboard(),
     )
 
 
@@ -1761,7 +1811,7 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
         with db_connection() as conn:
             rows = conn.execute("SELECT key, value FROM settings").fetchall()
             pending_rows = conn.execute(
-                "SELECT id, username, created_at FROM reports WHERE status = 'pending' ORDER BY id DESC LIMIT 50"
+                "SELECT id, username, created_at, data_json FROM reports WHERE status = 'pending' ORDER BY id DESC LIMIT 50"
             ).fetchall()
             user_count_row = conn.execute("SELECT COUNT(*) as cnt FROM users").fetchone()
         settings_map = {r["key"]: r["value"] for r in rows}
