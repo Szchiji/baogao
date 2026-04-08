@@ -804,11 +804,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 _verify_code_otps[text] = otp
                 base_url = (context.bot_data.get("admin_panel_url") or setting_get("admin_panel_url")).strip()
                 if base_url:
-                    login_url = f"{base_url.rstrip('/')}/admin/otp?token={otp}"
-                    await update.message.reply_text(
-                        f"✅ 身份验证成功！请点击以下链接登录后台（{_OTP_TOKEN_TTL // 60} 分钟内有效）：\n{login_url}",
-                        disable_web_page_preview=True,
-                    )
+                    await update.message.reply_text(f"✅ 身份验证成功！后台页面将自动跳转，请在 {_OTP_TOKEN_TTL // 60} 分钟内返回浏览器。")
                 else:
                     await update.message.reply_text("✅ 验证成功，但未配置 ADMIN_PANEL_URL。")
             else:
@@ -1316,6 +1312,16 @@ textarea{resize:vertical;min-height:70px}
 .tpl-field-card{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;margin-bottom:10px;overflow:hidden}
 .tpl-field-card .editor-row{background:transparent;border:none;border-radius:0;margin-bottom:0}
 @media(max-width:600px){.field-row{grid-template-columns:1fr}}
+.rte-wrap{border:1px solid #cbd5e1;border-radius:6px;overflow:hidden;background:#fff}
+.rte-wrap:focus-within{border-color:#2563eb;box-shadow:0 0 0 3px rgba(37,99,235,.1)}
+.rte-toolbar{display:flex;flex-wrap:wrap;gap:2px;padding:5px 8px;background:#f8fafc;border-bottom:1px solid #e2e8f0}
+.rte-btn{padding:3px 8px;border:1px solid transparent;border-radius:4px;background:none;cursor:pointer;font-size:.85rem;font-family:inherit;color:#374151;transition:all .1s;line-height:1.4}
+.rte-btn:hover{background:#e5e7eb;border-color:#d1d5db}
+.rte-body{padding:8px 10px;min-height:70px;outline:none;font-size:.9rem;line-height:1.6;font-family:inherit;word-break:break-word}
+.rte-body:empty:before{content:attr(data-ph);color:#94a3b8;pointer-events:none;display:block}
+.rte-pills{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px}
+.rte-pill{padding:3px 10px;background:#eff6ff;color:#2563eb;border:1px solid #bfdbfe;border-radius:12px;cursor:pointer;font-size:.8rem;transition:all .15s;font-family:inherit}
+.rte-pill:hover{background:#dbeafe;border-color:#93c5fd}
 """
 
 _ADMIN_JS = """
@@ -1331,6 +1337,8 @@ _ADMIN_JS = """
       document.getElementById('pane-'+btn.dataset.tab).classList.add('active');
       var noSaveTabs=['pending','blacklist','broadcast'];
       if(saveBar) saveBar.style.display=noSaveTabs.indexOf(btn.dataset.tab)>=0?'none':'';
+      if(btn.dataset.tab==='review'&&_rteMap['push_template'])_rteMap['push_template'].refreshPills();
+      if(btn.dataset.tab==='broadcast'&&_rteMap['broadcast_text'])_rteMap['broadcast_text'].refreshPills();
     });
   });
 
@@ -1487,6 +1495,7 @@ _ADMIN_JS = """
   }
 
   document.getElementById('settings-form').addEventListener('submit',function(){
+    Object.keys(_rteMap).forEach(function(k){if(_rteMap[k])_rteMap[k].sync();});
     serializeStartBtns();
     serializeKb();
     serializeTemplate();
@@ -1562,6 +1571,107 @@ _ADMIN_JS = """
   }
   initPushFields();
 
+  // Rich Text Editor
+  function serializeRTENode(node){
+    var out='';
+    node.childNodes.forEach(function(n){
+      if(n.nodeType===3){
+        out+=n.textContent.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      } else if(n.nodeType===1){
+        var t=n.tagName.toLowerCase();
+        var inner=serializeRTENode(n);
+        if(t==='b'||t==='strong') out+='<b>'+inner+'</b>';
+        else if(t==='i'||t==='em') out+='<i>'+inner+'</i>';
+        else if(t==='u') out+='<u>'+inner+'</u>';
+        else if(t==='s'||t==='strike'||t==='del') out+='<s>'+inner+'</s>';
+        else if(t==='code') out+='<code>'+inner+'</code>';
+        else if(t==='a'){var href=(n.getAttribute('href')||'').replace(/"/g,'&quot;');out+='<a href="'+href+'">'+inner+'</a>';}
+        else if(t==='br') out+='\n';
+        else if(t==='div'||t==='p') out+=(inner||'')+'\n';
+        else out+=inner;
+      }
+    });
+    return out;
+  }
+  var _rteMap={};
+  function RichTextEditor(ta,getPills){
+    var self=this; self._ta=ta; self._getPills=getPills||null; self._pd=null;
+    var wrap=document.createElement('div'); wrap.className='rte-wrap';
+    ta.parentNode.insertBefore(wrap,ta); ta.style.display='none';
+    if(getPills){var pd=document.createElement('div');pd.className='rte-pills';wrap.appendChild(pd);self._pd=pd;}
+    var tb=document.createElement('div'); tb.className='rte-toolbar'; wrap.appendChild(tb);
+    var body=document.createElement('div'); body.className='rte-body'; body.contentEditable='true';
+    body.setAttribute('data-ph',ta.getAttribute('placeholder')||'输入内容…');
+    var existing=ta.value; if(existing) body.innerHTML=existing.replace(/\n/g,'<br>');
+    wrap.appendChild(body); self._body=body;
+    var tools=[
+      {cmd:'bold',html:'<b>B</b>',title:'粗体'},
+      {cmd:'italic',html:'<i>I</i>',title:'斜体'},
+      {cmd:'underline',html:'<u>U</u>',title:'下划线'},
+      {cmd:'strikeThrough',html:'<s>S</s>',title:'删除线'},
+      {cmd:'code',html:'<code style="font-size:.8rem">&lt;/&gt;</code>',title:'代码'},
+      {cmd:'link',html:'🔗',title:'添加链接'},
+      {cmd:'unlink',html:'🔗✕',title:'移除链接'},
+      {cmd:'undo',html:'↩',title:'撤销'},
+      {cmd:'redo',html:'↪',title:'重做'}
+    ];
+    tools.forEach(function(t){
+      var btn=document.createElement('button'); btn.type='button';
+      btn.innerHTML=t.html; btn.title=t.title; btn.className='rte-btn';
+      btn.addEventListener('mousedown',function(e){
+        e.preventDefault(); body.focus();
+        if(t.cmd==='code'){
+          var sel=window.getSelection();
+          if(sel&&sel.rangeCount>0&&!sel.isCollapsed){
+            var range=sel.getRangeAt(0);
+            var codeEl=document.createElement('code');
+            try{range.surroundContents(codeEl);}catch(ex){var et=range.toString().replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');document.execCommand('insertHTML',false,'<code>'+et+'</code>');}
+          } else {document.execCommand('insertHTML',false,'<code></code>');}
+        } else if(t.cmd==='link'){
+          var sel=window.getSelection(); var st=sel?sel.toString():'';
+          var url=prompt('输入链接地址（https://...）','');
+          if(url){
+            if(st){document.execCommand('createLink',false,url);}
+            else{var su=url.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');document.execCommand('insertHTML',false,'<a href="'+su+'">'+su+'</a>');}
+          }
+        } else if(t.cmd==='unlink'){document.execCommand('unlink');}
+        else if(t.cmd==='undo'){document.execCommand('undo');}
+        else if(t.cmd==='redo'){document.execCommand('redo');}
+        else{document.execCommand(t.cmd);}
+      });
+      tb.appendChild(btn);
+    });
+    self.sync=function(){var raw=serializeRTENode(body);self._ta.value=raw.replace(/\n+$/,'');};
+    self.refreshPills=function(){
+      if(!self._pd||!self._getPills)return;
+      var pills=self._getPills(); self._pd.innerHTML='';
+      pills.forEach(function(p){
+        var btn=document.createElement('button'); btn.type='button'; btn.className='rte-pill';
+        btn.textContent=p.label; btn.title='插入: '+p.insert;
+        btn.addEventListener('click',function(){body.focus();document.execCommand('insertText',false,p.insert);});
+        self._pd.appendChild(btn);
+      });
+    };
+  }
+  function getPushTemplatePills(){
+    var pills=[{label:'报告ID',insert:'{id}'},{label:'用户名',insert:'{username}'},{label:'推送详情',insert:'{detail}'},{label:'报告链接',insert:'{link}'}];
+    getTplTextFields().forEach(function(f){pills.push({label:f.label,insert:'{'+f.key+'}'});});
+    return pills;
+  }
+  function getBroadcastPills(){
+    var pills=[];
+    getTplTextFields().forEach(function(f){pills.push({label:f.label,insert:'{'+f.key+'}'});});
+    return pills;
+  }
+  ['start_text','search_help_text','contact_text','usage_text'].forEach(function(name){
+    var ta=document.querySelector('[name="'+name+'"]');
+    if(ta) _rteMap[name]=new RichTextEditor(ta,null);
+  });
+  var ptTa=document.querySelector('[name="push_template"]');
+  if(ptTa){_rteMap['push_template']=new RichTextEditor(ptTa,getPushTemplatePills);_rteMap['push_template'].refreshPills();}
+  var btTa=document.querySelector('[name="broadcast_text"]');
+  if(btTa){_rteMap['broadcast_text']=new RichTextEditor(btTa,getBroadcastPills);_rteMap['broadcast_text'].refreshPills();}
+
   // Broadcast Buttons Editor
   var broadcastBtnsRows=document.getElementById('broadcast-btn-rows');
   if(broadcastBtnsRows){
@@ -1592,6 +1702,7 @@ _ADMIN_JS = """
       document.getElementById('broadcast_buttons_json').value=JSON.stringify(result);
     }
     document.getElementById('broadcast-form').addEventListener('submit',function(){
+      if(_rteMap['broadcast_text'])_rteMap['broadcast_text'].sync();
       serializeBroadcastBtns();
       return confirm('确认向所有用户发送广播？');
     });
@@ -1791,7 +1902,7 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
   <div class="field">
     <label>/start 欢迎文本</label>
     <textarea name="start_text" rows="4">{e('start_text')}</textarea>
-    <div class="hint">支持 HTML 格式：&lt;b&gt;加粗&lt;/b&gt;、&lt;i&gt;斜体&lt;/i&gt;、&lt;a href="..."&gt;链接&lt;/a&gt;</div>
+    <div class="hint">使用工具栏进行格式化；支持 Telegram HTML：加粗、斜体、下划线、链接等</div>
   </div>
   <div class="field-row">
     <div class="field">
@@ -1871,7 +1982,7 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
   <div class="field">
     <label>推送频道 — 推送模板</label>
     <textarea name="push_template" rows="4">{e('push_template')}</textarea>
-    <div class="hint">支持占位符：{{id}} 报告编号、{{username}} 用户名、{{detail}} 报告字段内容、{{link}} 报告链接。<br>还可直接使用字段键名，如模板含 <code>title</code> 字段则可用 {{{{title}}}}（前后各两个大括号）。</div>
+    <div class="hint">支持占位符：{{id}} 报告编号、{{username}} 用户名、{{detail}} 报告字段内容、{{link}} 报告链接；点击上方字段按钮快速插入。<br>还可直接使用字段键名，如模板含 <code>title</code> 字段则可用 {{{{title}}}}（前后各两个大括号）。</div>
   </div>
   <div class="field">
     <label>推送详情字段 — 顺序与选择</label>
@@ -1916,7 +2027,7 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
   <form id="broadcast-form" method="post" action="/admin/broadcast">
     <div class="field">
       <label>广播文本</label>
-      <textarea name="broadcast_text" rows="5" placeholder="支持 HTML 格式：&lt;b&gt;加粗&lt;/b&gt;、&lt;i&gt;斜体&lt;/i&gt;、&lt;a href='...'&gt;链接&lt;/a&gt;"></textarea>
+      <textarea name="broadcast_text" rows="5" placeholder="使用工具栏格式化文字；点击字段按钮快速插入模板字段内容"></textarea>
     </div>
     <div class="field-row">
       <div class="field">
@@ -2295,7 +2406,7 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
     1. 复制下方验证码<br>
     2. 打开 Telegram 与机器人对话<br>
     3. 将验证码发送给机器人<br>
-    4. 机器人确认身份后会给您发送登录链接
+    4. 机器人确认后，此页面将自动跳转到后台
   </div>
   <div class="code-box" id="code-display">{code}</div>
   <p class="waiting" id="status-msg">⏳ 等待您在 Telegram 中发送验证码…</p>
