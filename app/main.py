@@ -1318,12 +1318,11 @@ _ADMIN_JS = """
 """
 
 
-def _render_report_content_for_admin(data_json: str) -> str:
+def _render_report_content_for_admin(data_json: str, tpl_fields: list[dict[str, Any]]) -> str:
     """Return a short HTML snippet showing all field values of a report for admin review."""
     data = parse_json(data_json, {})
     if not data:
         return "<em style='color:#94a3b8'>（无内容）</em>"
-    tpl_fields = report_template()["fields"]
     field_labels = {f["key"]: f["label"] for f in tpl_fields}
     field_types = {f["key"]: f.get("type", "text") for f in tpl_fields}
     parts = []
@@ -1369,9 +1368,10 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
     pending_badge = f'<span class="badge">{pending_count}</span>' if pending_count > 0 else ""
 
     if pending_reports:
+        tpl_fields = report_template()["fields"]
         rows_html = ""
         for r in pending_reports:
-            content_html = _render_report_content_for_admin(r.get("data_json", "{}"))
+            content_html = _render_report_content_for_admin(r.get("data_json", "{}"), tpl_fields)
             rows_html += (
                 "<tr>"
                 f"<td>#{r['id']}</td>"
