@@ -240,6 +240,26 @@ def init_db() -> None:
             )
             """
         )
+        # Migration: if users table exists with a different schema (missing user_id column),
+        # drop and recreate it. User rows are re-inserted automatically on next interaction.
+        has_user_id_col = conn.execute(
+            """
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'users' AND column_name = 'user_id'
+            """
+        ).fetchone()
+        if not has_user_id_col:
+            conn.execute("DROP TABLE users")
+            conn.execute(
+                """
+                CREATE TABLE users (
+                  user_id BIGINT PRIMARY KEY,
+                  username TEXT,
+                  first_seen TEXT NOT NULL,
+                  last_seen TEXT NOT NULL
+                )
+                """
+            )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS blacklist (
@@ -250,6 +270,25 @@ def init_db() -> None:
             )
             """
         )
+        # Migration: if blacklist table exists with a different schema, drop and recreate.
+        has_blacklist_col = conn.execute(
+            """
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'blacklist' AND column_name = 'user_id'
+            """
+        ).fetchone()
+        if not has_blacklist_col:
+            conn.execute("DROP TABLE blacklist")
+            conn.execute(
+                """
+                CREATE TABLE blacklist (
+                  user_id BIGINT PRIMARY KEY,
+                  username TEXT,
+                  reason TEXT,
+                  added_at TEXT NOT NULL
+                )
+                """
+            )
         for key, value in DEFAULT_SETTINGS.items():
             conn.execute(
                 "INSERT INTO settings (key, value) VALUES (%s, %s) ON CONFLICT DO NOTHING", (key, value)
