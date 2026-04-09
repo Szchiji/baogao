@@ -941,13 +941,10 @@ async def submit_report(context: ContextTypes.DEFAULT_TYPE, update: Update) -> N
                     utc_now_iso(),
                 ),
             )
-            row = cur.fetchone()
-            if not row:
-                raise RuntimeError("INSERT RETURNING id returned no row")
-            report_id = row["id"]
-    except Exception:
+            report_id = cur.fetchone()["id"]
+    except psycopg2.Error:
         logger.exception(
-            "submit_report: failed to insert report for user_id=%s", update.effective_user.id
+            "submit_report: database error for user_id=%s", update.effective_user.id
         )
         await update.effective_chat.send_message("❌ 提交失败，请稍后重试。")
         return
