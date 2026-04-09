@@ -172,7 +172,7 @@ def load_config() -> AppConfig:
         raise RuntimeError("BOT_TOKEN is required")
     return AppConfig(
         token=token,
-        mode=os.getenv("BOT_MODE", "webhook").strip().lower(),
+        mode=os.getenv("BOT_MODE", "polling").strip().lower(),
         webhook_url=os.getenv("WEBHOOK_URL", "").strip(),
         webhook_path=os.getenv("WEBHOOK_PATH", "/webhook").strip(),
         host=os.getenv("HOST", "0.0.0.0").strip(),
