@@ -621,6 +621,7 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
         blacklist_html = "<p class='muted'>黑名单为空。</p>"
 
     saved_banner = "<div class='alert alert-success'>✅ 配置已保存成功！</div>" if saved else ""
+    pending_nav_badge = f"<span class='nav-badge'>{pending_count}</span>" if pending_count > 0 else ""
 
     media_types = [("", "无"), ("photo", "图片"), ("video", "视频")]
     current_media_type = settings_map.get("start_media_type", "").strip().lower()
@@ -655,7 +656,7 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
     <button type="button" class="nav-item" data-tab="texts"><span class="nav-icon">💬</span><span class="nav-label">文本配置</span></button>
     <button type="button" class="nav-item" data-tab="review"><span class="nav-icon">🔍</span><span class="nav-label">审核设置</span></button>
     <div class="nav-group">操作</div>
-    <button type="button" class="nav-item" data-tab="pending"><span class="nav-icon">⏳</span><span class="nav-label">待审核报告</span>{"<span class='nav-badge'>" + str(pending_count) + "</span>" if pending_count > 0 else ""}</button>
+    <button type="button" class="nav-item" data-tab="pending"><span class="nav-icon">⏳</span><span class="nav-label">待审核报告</span>{pending_nav_badge}</button>
     <button type="button" class="nav-item" data-tab="blacklist"><span class="nav-icon">🚫</span><span class="nav-label">黑名单</span></button>
     <button type="button" class="nav-item" data-tab="broadcast"><span class="nav-icon">📢</span><span class="nav-label">广播发送</span></button>
   </nav>
