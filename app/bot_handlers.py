@@ -356,7 +356,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def submit_report(context: ContextTypes.DEFAULT_TYPE, update: Update) -> None:
     draft = context.user_data.get("report_draft")
     if not draft:
-        await update.effective_chat.send_message("请先点击\u201c写报告\u201d。")
+        await update.effective_chat.send_message("请先点击「写报告」。")
         return
     required_fields = [f["key"] for f in draft["template"]["fields"] if f.get("required", True)]
     missing = [k for k in required_fields if not draft["values"].get(k, "").strip()]

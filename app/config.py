@@ -38,7 +38,7 @@ DEFAULT_SETTINGS: dict[str, str] = {
         ensure_ascii=False,
     ),
     "contact_text": "请联系管理员处理。",
-    "usage_text": "1. 点击\u201c写报告\u201d填写模板\n2. 填完后提交审核\n3. 审核通过后可查阅。",
+    "usage_text": "1. 点击「写报告」填写模板\n2. 填完后提交审核\n3. 审核通过后可查阅。",
     "search_help_text": "发送 @用户名 或 #标签 查询报告。",
     "report_link_base": "",
     "push_detail_fields_json": "[]",
