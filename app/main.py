@@ -101,7 +101,7 @@ class _PGConn:
         self._conn = raw_conn
         self._cur = raw_conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
-    def execute(self, sql: Any, params: tuple = ()) -> Any:
+    def execute(self, sql: Any, params: tuple | None = None) -> Any:
         self._cur.execute(sql, params)
         return self._cur
 
@@ -2864,16 +2864,21 @@ async def run_webhook(bot_app: Application, config: AppConfig) -> None:
 
 
 def main() -> None:
+    logger.info("Starting: initializing database…")
     init_db()
+    logger.info("Database ready. Loading config…")
     config = load_config()
+    logger.info("Config loaded (mode=%s). Applying settings…", config.mode)
     setting_set("admin_panel_url", config.admin_panel_url)
     app = create_bot_application(config.token)
     app.bot_data["admin_panel_url"] = config.admin_panel_url
     app.bot_data["admin_panel_token"] = config.admin_panel_token
 
     if config.mode == "webhook":
+        logger.info("Starting webhook server on %s:%s", config.host, config.port)
         asyncio.run(run_webhook(app, config))
     else:
+        logger.info("Starting polling mode")
         run_polling(app)
 
 
