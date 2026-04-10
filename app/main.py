@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 
 import psycopg2
 import psycopg2.extras
+import psycopg2.sql
 import uvicorn
 from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -100,7 +101,7 @@ class _PGConn:
         self._conn = raw_conn
         self._cur = raw_conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
-    def execute(self, sql: str, params: tuple = ()) -> Any:
+    def execute(self, sql: Any, params: tuple = ()) -> Any:
         self._cur.execute(sql, params)
         return self._cur
 
@@ -225,9 +226,44 @@ def init_db() -> None:
             )
             """
         )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status, id DESC)"
-        )
+        # Migration: rename camelCase columns to snake_case BEFORE adding new columns.
+        # This must run before ADD COLUMN operations to avoid a conflict where ADD COLUMN
+        # creates the snake_case column and then the subsequent RENAME fails because the
+        # target already exists.
+        for old_col, new_col in [("createdAt", "created_at"), ("reviewedAt", "reviewed_at")]:
+            has_camel = conn.execute(
+                """
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'reports' AND column_name = %s
+                """,
+                (old_col,),
+            ).fetchone()
+            if has_camel:
+                has_target = conn.execute(
+                    """
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'reports' AND column_name = %s
+                    """,
+                    (new_col,),
+                ).fetchone()
+                if not has_target:
+                    # Target column does not exist yet — safe to rename.
+                    conn.execute(
+                        psycopg2.sql.SQL("ALTER TABLE reports RENAME COLUMN {} TO {}").format(
+                            psycopg2.sql.Identifier(old_col),
+                            psycopg2.sql.Identifier(new_col),
+                        )
+                    )
+                else:
+                    # Both camelCase and snake_case columns exist (zombie state from a
+                    # previously interrupted migration).  The snake_case column is already
+                    # used by all queries, so drop the now-unused camelCase column to
+                    # eliminate its NOT NULL constraint that would otherwise break INSERTs.
+                    conn.execute(
+                        psycopg2.sql.SQL("ALTER TABLE reports DROP COLUMN {}").format(
+                            psycopg2.sql.Identifier(old_col),
+                        )
+                    )
         # Migration: add missing columns if they do not exist yet
         conn.execute("ALTER TABLE reports ADD COLUMN IF NOT EXISTS user_id BIGINT")
         conn.execute("ALTER TABLE reports ADD COLUMN IF NOT EXISTS username TEXT")
@@ -238,17 +274,11 @@ def init_db() -> None:
         conn.execute("ALTER TABLE reports ADD COLUMN IF NOT EXISTS created_at TEXT")
         conn.execute("ALTER TABLE reports ADD COLUMN IF NOT EXISTS reviewed_at TEXT")
         conn.execute("ALTER TABLE reports ADD COLUMN IF NOT EXISTS channel_message_link TEXT")
-        # Migration: rename camelCase columns to snake_case if they exist (legacy schema)
-        for old_col, new_col in [("createdAt", "created_at"), ("reviewedAt", "reviewed_at")]:
-            has_camel = conn.execute(
-                """
-                SELECT 1 FROM information_schema.columns
-                WHERE table_name = 'reports' AND column_name = %s
-                """,
-                (old_col,),
-            ).fetchone()
-            if has_camel:
-                conn.execute(f'ALTER TABLE reports RENAME COLUMN "{old_col}" TO "{new_col}"')
+        # Create index AFTER all column migrations so that the indexed column (status)
+        # is guaranteed to exist even on legacy databases that lacked it initially.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status, id DESC)"
+        )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
@@ -961,7 +991,7 @@ async def submit_report(context: ContextTypes.DEFAULT_TYPE, update: Update) -> N
                 ),
             )
             report_id = cur.fetchone()["id"]
-    except (psycopg2.Error, RuntimeError):
+    except Exception:
         logger.exception(
             "submit_report: error for user_id=%s", update.effective_user.id
         )
@@ -1282,6 +1312,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if data == "submit_report":
         await query.answer()
+        if is_user_banned(update.effective_user.id):
+            await query.message.reply_text("您已被限制使用此机器人。")
+            return
+        sub_channel = setting_get("force_sub_channel", "").strip()
+        if sub_channel and not await is_subscribed(context.bot, update.effective_user.id):
+            await query.message.reply_text("请先订阅频道后再提交报告。")
+            return
         await submit_report(context, update)
         return
 
