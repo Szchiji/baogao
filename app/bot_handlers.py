@@ -1184,6 +1184,12 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+_PENDING_REMINDER_INTERVAL = 7200    # 2 hours
+_PENDING_REMINDER_FIRST = 300         # 5 minutes after start
+_AUTO_CLEANUP_INTERVAL = 86400        # 24 hours
+_AUTO_CLEANUP_FIRST = 3600            # 1 hour after start
+
+
 async def _pending_reminder_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Periodic job: notify admins of reports pending for over 24 hours."""
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
@@ -1274,9 +1280,13 @@ def create_bot_application(token: str) -> Application:
 
     if app.job_queue is not None:
         # Remind admins every 2 hours about pending reports older than 24 hours (start after 5 min)
-        app.job_queue.run_repeating(_pending_reminder_job, interval=7200, first=300)
+        app.job_queue.run_repeating(
+            _pending_reminder_job, interval=_PENDING_REMINDER_INTERVAL, first=_PENDING_REMINDER_FIRST
+        )
         # Clean up old rejected reports once a day (start after 1 hour)
-        app.job_queue.run_repeating(_auto_cleanup_job, interval=86400, first=3600)
+        app.job_queue.run_repeating(
+            _auto_cleanup_job, interval=_AUTO_CLEANUP_INTERVAL, first=_AUTO_CLEANUP_FIRST
+        )
     else:
         logger.warning(
             "APScheduler not available — periodic jobs disabled. "

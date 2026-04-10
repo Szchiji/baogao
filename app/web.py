@@ -168,9 +168,9 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
             with db_connection() as conn:
                 conn.execute("SELECT 1")
             return {"ok": True, "db": "ok"}
-        except Exception as exc:
-            logger.warning("healthz: DB check failed: %s", exc)
-            return JSONResponse({"ok": False, "db": str(exc)}, status_code=503)
+        except Exception:
+            logger.warning("healthz: DB check failed", exc_info=True)
+            return JSONResponse({"ok": False, "db": "unavailable"}, status_code=503)
 
     @web.get("/reports/{report_id}", response_class=HTMLResponse)
     async def report_detail(report_id: str):
