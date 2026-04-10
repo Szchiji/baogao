@@ -917,28 +917,37 @@ async def submit_report(context: ContextTypes.DEFAULT_TYPE, update: Update) -> N
     required_fields = [f["key"] for f in draft["template"]["fields"] if f.get("required", True)]
     missing = [k for k in required_fields if not draft["values"].get(k, "").strip()]
     if missing:
-        await update.effective_chat.send_message("仍有未填写项，请继续完善。")
+        fields_map = {f["key"]: f["label"] for f in draft["template"]["fields"]}
+        missing_labels = "、".join(fields_map.get(k, k) for k in missing)
+        await update.effective_chat.send_message(f"以下必填项尚未填写，请继续完善：{missing_labels}")
         return
     values = draft["values"]
     tag = values.get("tag", "")
     username = update.effective_user.username or ""
     template = draft["template"]
-    with db_connection() as conn:
-        cur = conn.execute(
-            """
-            INSERT INTO reports (user_id, username, tag, data_json, status, created_at)
-            VALUES (%s, %s, %s, %s, 'pending', %s)
-            RETURNING id
-            """,
-            (
-                update.effective_user.id,
-                username,
-                tag,
-                json.dumps(values, ensure_ascii=False),
-                utc_now_iso(),
-            ),
+    try:
+        with db_connection() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO reports (user_id, username, tag, data_json, status, created_at)
+                VALUES (%s, %s, %s, %s, 'pending', %s)
+                RETURNING id
+                """,
+                (
+                    update.effective_user.id,
+                    username,
+                    tag,
+                    json.dumps(values, ensure_ascii=False),
+                    utc_now_iso(),
+                ),
+            )
+            report_id = cur.fetchone()["id"]
+    except psycopg2.Error:
+        logger.exception(
+            "submit_report: database error for user_id=%s", update.effective_user.id
         )
-        report_id = cur.fetchone()["id"]
+        await update.effective_chat.send_message("❌ 提交失败，请稍后重试。")
+        return
     context.user_data.pop("report_draft", None)
     await update.effective_chat.send_message(f"✅ 报告 #{report_id} 已提交，等待审核。")
 
@@ -2540,7 +2549,22 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
         _otp_tokens.pop(token, None)
         if not config.admin_panel_token:
             return RedirectResponse(url="/admin", status_code=303)
-        response = RedirectResponse(url="/admin", status_code=303)
+        # Return an HTML page that sets the cookie *before* navigating to /admin.
+        # Using a plain 303 redirect with Set-Cookie can be unreliable in some
+        # browsers/WebViews (e.g. Telegram's built-in browser) because the cookie
+        # may not be committed to storage before the browser issues the follow-up
+        # GET /admin request.  An explicit JS + meta-refresh redirect from a 200
+        # response guarantees the cookie is stored first.
+        response = HTMLResponse("""<!DOCTYPE html>
+<html lang="zh"><head>
+<meta charset="utf-8">
+<meta http-equiv="refresh" content="0; url=/admin">
+<script>window.location.replace('/admin');</script>
+</head>
+<body style="font-family:sans-serif;padding:40px">
+✅ 验证成功，正在跳转到后台…<br>
+如果页面没有自动跳转，请<a href="/admin">点击这里</a>。
+</body></html>""")
         response.set_cookie(
             key="admin_token",
             value=config.admin_panel_token,
