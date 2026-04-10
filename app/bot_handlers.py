@@ -292,8 +292,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     channels = get_force_sub_channels()
     if channels and not await is_subscribed(context.bot, update.effective_user.id):
-        text, markup = await _build_force_sub_prompt(context.bot, channels)
-        sent = await update.message.reply_text(text, reply_markup=markup)
+        sub_text, markup = await _build_force_sub_prompt(context.bot, channels)
+        sent = await update.message.reply_text(sub_text, reply_markup=markup)
         schedule_auto_delete(context.bot, sent.chat_id, sent.message_id)
         return
 
@@ -925,6 +925,31 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     schedule_auto_delete(context.bot, sent_preview.chat_id, sent_preview.message_id)
 
 
+async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_user_admin(update.effective_user.id):
+        await update.message.reply_text("无权限。")
+        return
+    with db_connection() as conn:
+        user_count_row = conn.execute("SELECT COUNT(*) as cnt FROM users").fetchone()
+        report_counts = conn.execute(
+            "SELECT status, COUNT(*) as cnt FROM reports GROUP BY status"
+        ).fetchall()
+    total_users = user_count_row["cnt"] if user_count_row else 0
+    counts = {r["status"]: r["cnt"] for r in report_counts}
+    total_reports = sum(counts.values())
+    pending = counts.get("pending", 0)
+    approved = counts.get("approved", 0)
+    rejected = counts.get("rejected", 0)
+    await update.message.reply_text(
+        f"📊 统计数据\n\n"
+        f"👥 用户：{total_users} 人\n"
+        f"📋 报告总数：{total_reports}\n"
+        f"  ⏳ 待审核：{pending}\n"
+        f"  ✅ 已通过：{approved}\n"
+        f"  ❌ 已驳回：{rejected}"
+    )
+
+
 async def ptb_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     update_id = getattr(update, "update_id", None)
     user_id = None
@@ -961,6 +986,7 @@ def create_bot_application(token: str) -> Application:
     app.add_handler(CommandHandler("reject", reject_cmd))
     app.add_handler(CommandHandler("ban", ban_cmd))
     app.add_handler(CommandHandler("unban", unban_cmd))
+    app.add_handler(CommandHandler("stats", stats_cmd))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, on_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))

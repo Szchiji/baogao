@@ -9,14 +9,78 @@ from app.utils import parse_json
 
 def report_to_html(report_row: dict) -> str:
     data = parse_json(report_row["data_json"], {})
-    lines = [f"<h1>报告 #{report_row['id']}</h1>"]
-    lines.append(f"<p>状态：{report_row['status']}</p>")
-    lines.append(f"<p>用户：@{report_row['username'] or 'unknown'}</p>")
-    lines.append("<ul>")
-    for k, v in data.items():
-        lines.append(f"<li><b>{k}</b>：{v}</li>")
-    lines.append("</ul>")
-    return "\n".join(lines)
+    tpl = report_template()
+    field_labels = {f["key"]: f["label"] for f in tpl.get("fields", [])}
+    field_types = {f["key"]: f.get("type", "text") for f in tpl.get("fields", [])}
+
+    status = report_row.get("status", "")
+    status_map = {
+        "pending": ("<span style='background:#fef9c3;color:#854d0e;border:1px solid #fde047;padding:2px 10px;border-radius:12px;font-size:.8rem;font-weight:600'>⏳ 待审核</span>",),
+        "approved": ("<span style='background:#dcfce7;color:#166534;border:1px solid #86efac;padding:2px 10px;border-radius:12px;font-size:.8rem;font-weight:600'>✅ 已通过</span>",),
+        "rejected": ("<span style='background:#fee2e2;color:#991b1b;border:1px solid #fca5a5;padding:2px 10px;border-radius:12px;font-size:.8rem;font-weight:600'>❌ 已驳回</span>",),
+    }
+    status_badge = status_map.get(status, (html.escape(status),))[0]
+
+    rows_html = ""
+    seen: set[str] = set()
+    ordered_keys = [f["key"] for f in tpl.get("fields", [])]
+    for k in ordered_keys + [k for k in data if k not in ordered_keys]:
+        if k in seen or k not in data:
+            continue
+        seen.add(k)
+        label = html.escape(field_labels.get(k, k))
+        if field_types.get(k, "text") == "photo":
+            val_html = "<span style='color:#6b7280;font-style:italic'>📷 图片字段</span>"
+        else:
+            val_html = html.escape(str(data[k]))
+        rows_html += f"""
+        <div style='margin-bottom:16px'>
+          <div style='font-size:.75rem;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px'>{label}</div>
+          <div style='font-size:.95rem;color:#111827;line-height:1.6;white-space:pre-wrap;word-break:break-word'>{val_html}</div>
+        </div>"""
+
+    created_at = html.escape(str(report_row.get("created_at", ""))[:19])
+    username = html.escape(report_row.get("username") or "unknown")
+    report_id = html.escape(str(report_row.get("id", "")))
+
+    return f"""<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>报告 #{report_id}</title>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f9fafb;color:#111827;min-height:100vh}}
+.topbar{{background:#1e1b4b;padding:14px 24px;display:flex;align-items:center;gap:16px}}
+.topbar a{{color:#c7d2fe;text-decoration:none;font-size:.85rem;display:flex;align-items:center;gap:5px}}
+.topbar a:hover{{color:#fff}}
+.topbar-title{{color:#fff;font-weight:700;font-size:1rem}}
+.content{{max-width:720px;margin:32px auto;padding:0 16px 48px}}
+.card{{background:#fff;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,.08);border:1px solid #e5e7eb;padding:24px;margin-bottom:16px}}
+.meta{{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:20px;padding-bottom:16px;border-bottom:1px solid #f1f5f9}}
+.meta-item{{font-size:.85rem;color:#6b7280}}
+.meta-item b{{color:#374151}}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <a href="javascript:history.back()">← 返回</a>
+  <span class="topbar-title">📋 报告 #{report_id}</span>
+</div>
+<div class="content">
+  <div class="card">
+    <div class="meta">
+      <div class="meta-item"><b>报告 ID</b>：#{report_id}</div>
+      <div class="meta-item"><b>用户</b>：@{username}</div>
+      <div class="meta-item"><b>提交时间</b>：{created_at}</div>
+      <div class="meta-item">{status_badge}</div>
+    </div>
+    {rows_html if rows_html else "<p style='color:#9ca3af;font-style:italic'>（无字段内容）</p>"}
+  </div>
+</div>
+</body>
+</html>"""
 
 
 _ADMIN_CSS = """
@@ -109,7 +173,7 @@ _ADMIN_JS = """
   var overlay=document.querySelector('.sidebar-overlay');
   var hamburger=document.getElementById('hamburger');
   var topbarTitle=document.getElementById('topbar-title');
-  var noSaveTabs=['pending','blacklist','broadcast'];
+  var noSaveTabs=['pending','blacklist','broadcast','reports'];
   function switchTab(tab){
     navItems.forEach(function(b){b.classList.remove('active');});
     tabPanes.forEach(function(p){p.classList.remove('active');});
@@ -130,6 +194,13 @@ _ADMIN_JS = """
   navItems.forEach(function(btn){
     btn.addEventListener('click',function(){switchTab(btn.dataset.tab);});
   });
+  // Restore tab from URL hash or query param
+  (function(){
+    var params=new URLSearchParams(window.location.search);
+    var tab=params.get('tab')||'';
+    if(!tab){var h=window.location.hash.replace('#','').replace('tab=','');if(h)tab=h;}
+    if(tab){switchTab(tab);}
+  })();
   if(hamburger){
     hamburger.addEventListener('click',function(){
       sidebar.classList.toggle('open');
@@ -530,7 +601,7 @@ def _render_report_content_for_admin(data_json: str, tpl_fields: list[dict[str, 
     return "<br>".join(parts) if parts else "<em style='color:#94a3b8'>（无内容）</em>"
 
 
-def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] | None = None, saved: bool = False, user_count: int = 0, db_path: str = "", blacklist: list[dict] | None = None) -> str:
+def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] | None = None, saved: bool = False, user_count: int = 0, db_path: str = "", blacklist: list[dict] | None = None, all_reports: list[dict] | None = None, stats: dict | None = None, initial_tab: str = "basic") -> str:
     def e(key: str) -> str:
         return html.escape(settings_map.get(key, ""))
 
@@ -620,7 +691,56 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
     else:
         blacklist_html = "<p class='muted'>黑名单为空。</p>"
 
+    # Build all reports HTML
+    if all_reports:
+        tpl_fields = report_template()["fields"]
+        ar_rows = ""
+        for r in all_reports:
+            st = r.get("status", "")
+            if st == "approved":
+                badge = "<span style='background:#dcfce7;color:#166534;border:1px solid #86efac;padding:2px 8px;border-radius:10px;font-size:.72rem;font-weight:700'>✅ 已通过</span>"
+            elif st == "rejected":
+                badge = "<span style='background:#fee2e2;color:#991b1b;border:1px solid #fca5a5;padding:2px 8px;border-radius:10px;font-size:.72rem;font-weight:700'>❌ 已驳回</span>"
+            else:
+                badge = "<span style='background:#fef9c3;color:#854d0e;border:1px solid #fde047;padding:2px 8px;border-radius:10px;font-size:.72rem;font-weight:700'>⏳ 待审核</span>"
+            content_html = _render_report_content_for_admin(r.get("data_json", "{}"), tpl_fields)
+            link_base = settings_map.get("report_link_base", "").strip()
+            channel_link = r.get("channel_message_link") or ""
+            if channel_link:
+                detail_link = f"<a href='{html.escape(channel_link)}' target='_blank' style='color:var(--pri);text-decoration:none;font-size:.8rem'>频道链接 →</a>"
+            elif link_base and st == "approved":
+                web_url = f"{link_base.rstrip('/')}/reports/{r['id']}"
+                detail_link = f"<a href='{html.escape(web_url)}' target='_blank' style='color:var(--pri);text-decoration:none;font-size:.8rem'>查看 →</a>"
+            else:
+                detail_link = ""
+            feedback = html.escape(str(r.get("review_feedback") or ""))
+            ar_rows += (
+                "<tr>"
+                f"<td>#{r['id']}</td>"
+                f"<td>@{html.escape(r['username'] or 'unknown')}</td>"
+                f"<td style='white-space:nowrap'>{html.escape(str(r.get('created_at',''))[:19])}</td>"
+                f"<td>{badge}</td>"
+                f"<td style='max-width:280px;word-break:break-word;font-size:.82rem;line-height:1.5'>{content_html}</td>"
+                f"<td style='white-space:nowrap'>{detail_link}</td>"
+                f"<td style='max-width:160px;word-break:break-word;font-size:.8rem;color:#6b7280'>{feedback}</td>"
+                "</tr>"
+            )
+        all_reports_html = (
+            "<div style='overflow-x:auto'><table class='table'><thead><tr>"
+            "<th>ID</th><th>用户</th><th>提交时间</th><th>状态</th><th>内容</th><th>链接</th><th>驳回原因</th>"
+            "</tr></thead><tbody>" + ar_rows + "</tbody></table></div>"
+        )
+    else:
+        all_reports_html = "<p class='muted'>暂无报告记录。</p>"
+
     saved_banner = "<div class='alert alert-success'>✅ 配置已保存成功！</div>" if saved else ""
+
+    # Build stats bar
+    _stats = stats or {}
+    total_reports = _stats.get("total_reports", 0)
+    approved_count = _stats.get("approved", 0)
+    rejected_count = _stats.get("rejected", 0)
+
     pending_nav_badge = f"<span class='nav-badge'>{pending_count}</span>" if pending_count > 0 else ""
 
     media_types = [("", "无"), ("photo", "图片"), ("video", "视频")]
@@ -657,6 +777,7 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
     <button type="button" class="nav-item" data-tab="review"><span class="nav-icon">🔍</span><span class="nav-label">审核设置</span></button>
     <div class="nav-group">操作</div>
     <button type="button" class="nav-item" data-tab="pending"><span class="nav-icon">⏳</span><span class="nav-label">待审核报告</span>{pending_nav_badge}</button>
+    <button type="button" class="nav-item" data-tab="reports"><span class="nav-icon">📂</span><span class="nav-label">报告历史</span></button>
     <button type="button" class="nav-item" data-tab="blacklist"><span class="nav-icon">🚫</span><span class="nav-label">黑名单</span></button>
     <button type="button" class="nav-item" data-tab="broadcast"><span class="nav-icon">📢</span><span class="nav-label">广播发送</span></button>
   </nav>
@@ -839,6 +960,18 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
           <a href="/admin#tab=pending" onclick="location.reload();return false;" style="font-size:.84rem;color:var(--pri);text-decoration:none">🔄 刷新</a>
         </div>
         <div style="overflow-x:auto">{pending_html}</div>
+      </div>
+    </div>
+
+    <div id="pane-reports" class="tab-pane">
+      <p class="section-title">报告历史（共 {total_reports} 条）</p>
+      <div class="card" style="padding:0;overflow:hidden">
+        <div style="padding:14px 18px;border-bottom:1px solid var(--bdr);display:flex;align-items:center;gap:12px">
+          <span style="font-size:.85rem;color:var(--txt2)">
+            ✅ 已通过 {approved_count} &nbsp; ❌ 已驳回 {rejected_count} &nbsp; ⏳ 待审核 {pending_count}
+          </span>
+        </div>
+        {all_reports_html}
       </div>
     </div>
 

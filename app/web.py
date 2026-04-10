@@ -75,6 +75,38 @@ async def _do_broadcast(
             await asyncio.sleep(_BATCH_DELAY)
 
 
+def _error_page(message: str, link_text: str = "重新验证", link_href: str = "/admin/verify") -> str:
+    msg_escaped = html.escape(message)
+    lt_escaped = html.escape(link_text)
+    lh_escaped = html.escape(link_href)
+    return f"""<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>错误</title>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f9fafb;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px}}
+.card{{background:#fff;border-radius:16px;box-shadow:0 4px 24px rgba(0,0,0,.1);padding:40px 36px;width:100%;max-width:420px;text-align:center}}
+.icon{{font-size:3rem;margin-bottom:16px}}
+h2{{font-size:1.15rem;font-weight:700;color:#111827;margin-bottom:8px}}
+p{{font-size:.88rem;color:#6b7280;line-height:1.6;margin-bottom:24px}}
+a{{display:inline-block;padding:10px 24px;background:#4f46e5;color:#fff;border-radius:8px;text-decoration:none;font-size:.9rem;font-weight:600;transition:background .15s}}
+a:hover{{background:#4338ca}}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="icon">❌</div>
+  <h2>验证失败</h2>
+  <p>{msg_escaped}</p>
+  <a href="{lh_escaped}">{lt_escaped}</a>
+</div>
+</body>
+</html>"""
+
+
 def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -234,14 +266,26 @@ input[type=password]:focus{outline:none;border-color:#4f46e5;box-shadow:0 0 0 3p
             blacklist_rows = conn.execute(
                 "SELECT user_id, username, reason, added_at FROM blacklist ORDER BY added_at DESC"
             ).fetchall()
+            all_report_rows = conn.execute(
+                "SELECT id, username, created_at, status, data_json, review_feedback, channel_message_link FROM reports ORDER BY id DESC LIMIT 200"
+            ).fetchall()
+            report_stats = conn.execute(
+                "SELECT status, COUNT(*) as cnt FROM reports GROUP BY status"
+            ).fetchall()
         settings_map = {r["key"]: r["value"] for r in rows}
         pending_list = [dict(r) for r in pending_rows]
         user_count = user_count_row["cnt"] if user_count_row else 0
         blacklist_list = [dict(r) for r in blacklist_rows]
+        stats = {r["status"]: r["cnt"] for r in report_stats}
+        stats["total_reports"] = sum(stats.values())
+        all_reports_list = [dict(r) for r in all_report_rows]
         response = HTMLResponse(build_admin_html(
             settings_map, pending_list, saved=saved,
             user_count=user_count, db_path="",
             blacklist=blacklist_list,
+            all_reports=all_reports_list,
+            stats=stats,
+            initial_tab=request.query_params.get("tab", "basic"),
         ))
         if should_set_cookie:
             response.set_cookie(
@@ -400,10 +444,10 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
     async def admin_otp_login(request: Request, token: str = ""):
         _cleanup_verify_state()
         if not token or token not in _otp_tokens:
-            return HTMLResponse("<html><body style='font-family:sans-serif;padding:40px'>❌ 链接无效或已过期，请重新验证。<br><a href='/admin/verify'>重新验证</a></body></html>", status_code=403)
+            return HTMLResponse(_error_page("链接无效或已过期，请重新获取验证码。"), status_code=403)
         if time.time() > _otp_tokens[token]:
             _otp_tokens.pop(token, None)
-            return HTMLResponse("<html><body style='font-family:sans-serif;padding:40px'>❌ 登录链接已过期，请重新验证。<br><a href='/admin/verify'>重新验证</a></body></html>", status_code=403)
+            return HTMLResponse(_error_page("登录链接已过期，请重新获取验证码。"), status_code=403)
         # Consume the token
         _otp_tokens.pop(token, None)
         if not config.admin_panel_token:
@@ -485,10 +529,7 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
             if key in allowed_keys and isinstance(value, str):
                 setting_set(key, value)
                 imported += 1
-        safe_count = html.escape(str(imported))
-        return HTMLResponse(
-            f"<html><body style='font-family:sans-serif;padding:40px'>✅ 成功导入 {safe_count} 项配置。<a href='/admin?saved=1'>返回后台</a></body></html>"
-        )
+        return RedirectResponse(url="/admin?saved=1", status_code=303)
 
     @web.post("/admin/approve/{report_id}")
     async def web_approve_report(report_id: str, request: Request):
@@ -514,8 +555,7 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
             await web.state.tg_application.bot.send_message(chat_id=report["user_id"], text=feedback)
         except Exception:
             logger.warning("failed to notify user %s of approval", report["user_id"], exc_info=True)
-        safe_id = html.escape(str(report_id))
-        return HTMLResponse(f"<html><body>报告 #{safe_id} 已通过。<a href='/admin'>返回</a></body></html>")
+        return RedirectResponse(url="/admin?tab=pending", status_code=303)
 
     @web.post("/admin/reject/{report_id}")
     async def web_reject_report(report_id: str, request: Request, reason: str = Form(default="请联系管理员")):
@@ -540,8 +580,7 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
             await web.state.tg_application.bot.send_message(chat_id=report["user_id"], text=feedback)
         except Exception:
             logger.warning("failed to notify user %s of rejection", report["user_id"], exc_info=True)
-        safe_id = html.escape(str(report_id))
-        return HTMLResponse(f"<html><body>报告 #{safe_id} 已驳回。<a href='/admin'>返回</a></body></html>")
+        return RedirectResponse(url="/admin?tab=pending", status_code=303)
 
     @web.post("/admin/broadcast")
     async def admin_broadcast(
@@ -575,9 +614,6 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
             broadcast_media_url.strip(),
             markup,
         )
-        safe_count = html.escape(str(len(user_ids)))
-        return HTMLResponse(
-            f"<html><body>广播任务已提交，将向 {safe_count} 位用户发送。<a href='/admin'>返回</a></body></html>"
-        )
+        return RedirectResponse(url="/admin?tab=broadcast", status_code=303)
 
     return web
