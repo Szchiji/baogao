@@ -603,20 +603,21 @@ async def approve_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not context.args:
         await update.message.reply_text("用法：/approve 报告ID")
         return
+    report_id = context.args[0]
     try:
-        report_id = int(context.args[0])
-    except ValueError:
-        await update.message.reply_text("报告ID必须是数字。")
+        with db_connection() as conn:
+            report = conn.execute("SELECT * FROM reports WHERE id = %s", (report_id,)).fetchone()
+            if not report:
+                await update.message.reply_text("报告不存在。")
+                return
+            conn.execute(
+                "UPDATE reports SET status='approved', reviewed_at=%s WHERE id = %s",
+                (utc_now_iso(), report_id),
+            )
+    except Exception:
+        logger.exception("approve_cmd: invalid report_id=%s", report_id)
+        await update.message.reply_text("报告ID格式无效。")
         return
-    with db_connection() as conn:
-        report = conn.execute("SELECT * FROM reports WHERE id = %s", (report_id,)).fetchone()
-        if not report:
-            await update.message.reply_text("报告不存在。")
-            return
-        conn.execute(
-            "UPDATE reports SET status='approved', reviewed_at=%s WHERE id = %s",
-            (utc_now_iso(), report_id),
-        )
     await update.message.reply_text(f"报告 #{report_id} 已通过。")
 
     channel_link = await _push_report_to_channel(context.bot, report_id, report)
@@ -631,21 +632,22 @@ async def reject_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not context.args:
         await update.message.reply_text("用法：/reject 报告ID 原因")
         return
-    try:
-        report_id = int(context.args[0])
-    except ValueError:
-        await update.message.reply_text("报告ID必须是数字。")
-        return
+    report_id = context.args[0]
     reason = " ".join(context.args[1:]).strip() or "请联系管理员"
-    with db_connection() as conn:
-        report = conn.execute("SELECT * FROM reports WHERE id = %s", (report_id,)).fetchone()
-        if not report:
-            await update.message.reply_text("报告不存在。")
-            return
-        conn.execute(
-            "UPDATE reports SET status='rejected', review_feedback=%s, reviewed_at=%s WHERE id = %s",
-            (reason, utc_now_iso(), report_id),
-        )
+    try:
+        with db_connection() as conn:
+            report = conn.execute("SELECT * FROM reports WHERE id = %s", (report_id,)).fetchone()
+            if not report:
+                await update.message.reply_text("报告不存在。")
+                return
+            conn.execute(
+                "UPDATE reports SET status='rejected', review_feedback=%s, reviewed_at=%s WHERE id = %s",
+                (reason, utc_now_iso(), report_id),
+            )
+    except Exception:
+        logger.exception("reject_cmd: invalid report_id=%s", report_id)
+        await update.message.reply_text("报告ID格式无效。")
+        return
     tpl = (
         setting_get("review_rejected_template", "").strip()
         or DEFAULT_SETTINGS["review_rejected_template"]
@@ -780,23 +782,24 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if not is_user_admin(update.effective_user.id):
             await query.answer("无权限。", show_alert=True)
             return
+        report_id = data.split(":", 1)[1]
         try:
-            report_id = int(data.split(":", 1)[1])
-        except ValueError:
+            with db_connection() as conn:
+                report = conn.execute("SELECT * FROM reports WHERE id = %s", (report_id,)).fetchone()
+                if not report:
+                    await query.answer("报告不存在。", show_alert=True)
+                    return
+                if report["status"] != "pending":
+                    await query.answer(f"报告已处于 {report['status']} 状态。", show_alert=True)
+                    return
+                conn.execute(
+                    "UPDATE reports SET status='approved', reviewed_at=%s WHERE id = %s",
+                    (utc_now_iso(), report_id),
+                )
+        except Exception:
+            logger.exception("approve callback: invalid report_id=%s", report_id)
             await query.answer("无效的报告ID。", show_alert=True)
             return
-        with db_connection() as conn:
-            report = conn.execute("SELECT * FROM reports WHERE id = %s", (report_id,)).fetchone()
-            if not report:
-                await query.answer("报告不存在。", show_alert=True)
-                return
-            if report["status"] != "pending":
-                await query.answer(f"报告已处于 {report['status']} 状态。", show_alert=True)
-                return
-            conn.execute(
-                "UPDATE reports SET status='approved', reviewed_at=%s WHERE id = %s",
-                (utc_now_iso(), report_id),
-            )
         await query.answer("已通过。")
         try:
             await query.edit_message_reply_markup(reply_markup=None)
@@ -814,13 +817,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if not is_user_admin(update.effective_user.id):
             await query.answer("无权限。", show_alert=True)
             return
+        report_id = data.split(":", 1)[1]
         try:
-            report_id = int(data.split(":", 1)[1])
-        except ValueError:
+            with db_connection() as conn:
+                report = conn.execute("SELECT * FROM reports WHERE id = %s", (report_id,)).fetchone()
+        except Exception:
+            logger.exception("reject callback: invalid report_id=%s", report_id)
             await query.answer("无效的报告ID。", show_alert=True)
             return
-        with db_connection() as conn:
-            report = conn.execute("SELECT * FROM reports WHERE id = %s", (report_id,)).fetchone()
         if not report:
             await query.answer("报告不存在。", show_alert=True)
             return

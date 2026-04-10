@@ -133,7 +133,7 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
         return {"ok": True}
 
     @web.get("/reports/{report_id}", response_class=HTMLResponse)
-    async def report_detail(report_id: int):
+    async def report_detail(report_id: str):
         with db_connection() as conn:
             row = conn.execute(
                 "SELECT * FROM reports WHERE id = %s AND status = 'approved'", (report_id,)
@@ -464,7 +464,7 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
         )
 
     @web.post("/admin/approve/{report_id}")
-    async def web_approve_report(report_id: int, request: Request):
+    async def web_approve_report(report_id: str, request: Request):
         if redirect := _auth(request):
             return redirect
         with db_connection() as conn:
@@ -491,7 +491,7 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
         return HTMLResponse(f"<html><body>报告 #{safe_id} 已通过。<a href='/admin'>返回</a></body></html>")
 
     @web.post("/admin/reject/{report_id}")
-    async def web_reject_report(report_id: int, request: Request, reason: str = Form(default="请联系管理员")):
+    async def web_reject_report(report_id: str, request: Request, reason: str = Form(default="请联系管理员")):
         if redirect := _auth(request):
             return redirect
         with db_connection() as conn:

@@ -77,22 +77,24 @@ def init_db() -> None:
             )
             """
         )
-        # Always ensure reports.id has a sequence-backed DEFAULT, but only when the
-        # column is an integer type.  Databases migrated from an older schema may have
-        # id as UUID, in which case MAX(id) is undefined in PostgreSQL and a sequence
-        # is not applicable.  Tables migrated from SQLite (or created with a legacy
-        # integer schema) may have id as a plain INTEGER with no sequence, causing
-        # NotNullViolation when id is omitted from INSERT statements.  All three
-        # operations below are idempotent: CREATE SEQUENCE IF NOT EXISTS is a no-op
-        # when the sequence already exists, setval simply repositions the counter, and
-        # ALTER COLUMN SET DEFAULT re-confirms the existing default value.
-        id_col_type = conn.execute(
+        # Always ensure reports.id has an appropriate DEFAULT, but the mechanism
+        # differs by column type:
+        # • integer/bigint — use a sequence-backed DEFAULT (nextval).  Tables
+        #   migrated from SQLite may have a plain INTEGER id with no sequence,
+        #   causing NotNullViolation when id is omitted from INSERT statements.
+        #   CREATE SEQUENCE IF NOT EXISTS, setval, and ALTER COLUMN SET DEFAULT
+        #   are all idempotent so this block is safe to run on every startup.
+        # • uuid — use gen_random_uuid() as the DEFAULT so that INSERT statements
+        #   that omit id still get a unique identifier.  Without this, the NULL
+        #   primary-key constraint is violated.  We only set the default when none
+        #   is already present to avoid overwriting a deliberately chosen default.
+        id_col_info = conn.execute(
             """
-            SELECT data_type FROM information_schema.columns
+            SELECT data_type, column_default FROM information_schema.columns
             WHERE table_name = 'reports' AND column_name = 'id'
             """
         ).fetchone()
-        if id_col_type and id_col_type["data_type"] != "uuid":
+        if id_col_info and id_col_info["data_type"] != "uuid":
             conn.execute("CREATE SEQUENCE IF NOT EXISTS reports_id_seq")
             conn.execute(
                 """
@@ -105,6 +107,12 @@ def init_db() -> None:
             ).fetchone()
             conn.execute(
                 "ALTER TABLE reports ALTER COLUMN id SET DEFAULT nextval('reports_id_seq')"
+            )
+        elif id_col_info and id_col_info["data_type"] == "uuid" and not id_col_info["column_default"]:
+            # UUID id column with no default — set gen_random_uuid() so that
+            # INSERT statements that omit id receive an auto-generated UUID.
+            conn.execute(
+                "ALTER TABLE reports ALTER COLUMN id SET DEFAULT gen_random_uuid()"
             )
         # Migration: rename camelCase columns to snake_case BEFORE adding new columns.
         # This must run before ADD COLUMN operations to avoid a conflict where ADD COLUMN
