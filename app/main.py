@@ -228,7 +228,9 @@ def init_db() -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status, id DESC)"
         )
-        # Migration: add channel_message_link column if it does not exist yet
+        # Migration: add missing columns if they do not exist yet
+        conn.execute("ALTER TABLE reports ADD COLUMN IF NOT EXISTS tag TEXT")
+        conn.execute("ALTER TABLE reports ADD COLUMN IF NOT EXISTS data_json TEXT")
         conn.execute("ALTER TABLE reports ADD COLUMN IF NOT EXISTS channel_message_link TEXT")
         # Migration: rename camelCase columns to snake_case if they exist (legacy schema)
         for old_col, new_col in [("createdAt", "created_at"), ("reviewedAt", "reviewed_at")]:
