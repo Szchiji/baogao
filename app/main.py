@@ -961,9 +961,9 @@ async def submit_report(context: ContextTypes.DEFAULT_TYPE, update: Update) -> N
                 ),
             )
             report_id = cur.fetchone()["id"]
-    except psycopg2.Error:
+    except (psycopg2.Error, RuntimeError):
         logger.exception(
-            "submit_report: database error for user_id=%s", update.effective_user.id
+            "submit_report: error for user_id=%s", update.effective_user.id
         )
         await update.effective_chat.send_message("❌ 提交失败，请稍后重试。")
         return
@@ -1979,10 +1979,10 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
     <label>配置导出 / 导入</label>
     <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-start">
       <a href="/admin/export-settings" class="btn btn-primary" style="text-decoration:none;display:inline-block">⬇️ 导出配置 JSON</a>
-      <form method="post" action="/admin/import-settings" style="display:flex;gap:6px;align-items:flex-start;flex-wrap:wrap">
-        <textarea name="settings_json" rows="3" placeholder="粘贴之前导出的配置 JSON..." style="width:300px;min-width:200px;padding:6px 10px;border:1px solid #cbd5e1;border-radius:6px;font-size:.85rem;resize:vertical"></textarea>
-        <button type="submit" class="btn btn-success" onclick="return confirm('导入将覆盖现有配置，确认吗？')">⬆️ 导入配置</button>
-      </form>
+      <div style="display:flex;gap:6px;align-items:flex-start;flex-wrap:wrap">
+        <textarea name="settings_json" rows="3" placeholder="粘贴之前导出的配置 JSON..." style="width:300px;min-width:200px;padding:6px 10px;border:1px solid #cbd5e1;border-radius:6px;font-size:.85rem;resize:vertical" form="import-settings-form"></textarea>
+        <button type="submit" class="btn btn-success" onclick="return confirm('导入将覆盖现有配置，确认吗？')" form="import-settings-form">⬆️ 导入配置</button>
+      </div>
     </div>
     <div class="hint" style="margin-top:6px">可将当前配置导出为 JSON 文件保存备份；重新部署后可导入恢复设置。</div>
   </div>
@@ -2089,6 +2089,7 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
 </div>
 
 </form>
+<form id="import-settings-form" method="post" action="/admin/import-settings"></form>
 
 <div id="pane-pending" class="tab-pane">
   <p class="section-title">待审核报告（{pending_count} 条）</p>
