@@ -86,6 +86,42 @@ def schedule_auto_delete(bot: Bot, chat_id: int, message_id: int, delay: int = _
         )
 
 
+async def _build_force_sub_prompt(bot: Bot, channels: list[str]) -> tuple[str, InlineKeyboardMarkup]:
+    """Build the subscription prompt message and inline keyboard for *channels*.
+
+    For public channels a direct t.me link is used.  For private channels
+    (numeric IDs) the bot fetches a Telegram invite link via the API so users
+    get a real join button.  If the invite-link export fails (e.g. the bot is
+    not an admin of that channel), the channel identifier is listed in the
+    message text as a fallback.
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+    no_link_channels: list[str] = []
+    for i, ch in enumerate(channels):
+        link = build_channel_link(ch)
+        if link is None:
+            # Private / numeric channel — try to fetch an invite link from Telegram.
+            try:
+                link = await bot.export_chat_invite_link(chat_id=ch)
+            except Exception:
+                logger.warning(
+                    "Could not export invite link for channel %s (bot may not be admin)", ch
+                )
+        if link:
+            label = f"先去订阅频道 {i + 1}" if len(channels) > 1 else "先去订阅"
+            rows.append([InlineKeyboardButton(label, url=link)])
+        else:
+            no_link_channels.append(ch)
+    rows.append([InlineKeyboardButton("我已订阅，重新检测", callback_data="retry_sub")])
+    markup = InlineKeyboardMarkup(rows)
+
+    text = "请先订阅以下频道后再使用机器人。"
+    if no_link_channels:
+        ids_str = "、".join(no_link_channels)
+        text += f"\n\n需订阅的频道：{ids_str}"
+    return text, markup
+
+
 async def send_start_content(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = setting_get("start_text", DEFAULT_SETTINGS["start_text"])
     media_type = setting_get("start_media_type", "").strip().lower()
@@ -128,15 +164,8 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     channels = get_force_sub_channels()
     if channels and not await is_subscribed(context.bot, user_id):
-        rows: list[list[InlineKeyboardButton]] = []
-        for i, ch in enumerate(channels):
-            link = build_channel_link(ch)
-            if link:
-                label = f"先去订阅频道 {i + 1}" if len(channels) > 1 else "先去订阅"
-                rows.append([InlineKeyboardButton(label, url=link)])
-        rows.append([InlineKeyboardButton("我已订阅，重新检测", callback_data="retry_sub")])
-        markup = InlineKeyboardMarkup(rows)
-        sent = await update.effective_chat.send_message("请先订阅频道后再使用机器人。", reply_markup=markup)
+        text, markup = await _build_force_sub_prompt(context.bot, channels)
+        sent = await update.effective_chat.send_message(text, reply_markup=markup)
         schedule_auto_delete(context.bot, sent.chat_id, sent.message_id)
         return
     await send_start_content(update, context)
@@ -263,15 +292,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     channels = get_force_sub_channels()
     if channels and not await is_subscribed(context.bot, update.effective_user.id):
-        rows: list[list[InlineKeyboardButton]] = []
-        for i, ch in enumerate(channels):
-            link = build_channel_link(ch)
-            if link:
-                label = f"先去订阅频道 {i + 1}" if len(channels) > 1 else "先去订阅"
-                rows.append([InlineKeyboardButton(label, url=link)])
-        rows.append([InlineKeyboardButton("我已订阅，重新检测", callback_data="retry_sub")])
-        markup = InlineKeyboardMarkup(rows)
-        sent = await update.message.reply_text("请先订阅频道后再使用机器人。", reply_markup=markup)
+        text, markup = await _build_force_sub_prompt(context.bot, channels)
+        sent = await update.message.reply_text(text, reply_markup=markup)
         schedule_auto_delete(context.bot, sent.chat_id, sent.message_id)
         return
 
@@ -854,15 +876,8 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     channels = get_force_sub_channels()
     if channels and not await is_subscribed(context.bot, user.id):
-        rows: list[list[InlineKeyboardButton]] = []
-        for i, ch in enumerate(channels):
-            link = build_channel_link(ch)
-            if link:
-                label = f"先去订阅频道 {i + 1}" if len(channels) > 1 else "先去订阅"
-                rows.append([InlineKeyboardButton(label, url=link)])
-        rows.append([InlineKeyboardButton("我已订阅，重新检测", callback_data="retry_sub")])
-        markup = InlineKeyboardMarkup(rows)
-        sent = await update.message.reply_text("请先订阅频道后再使用机器人。", reply_markup=markup)
+        sub_text, markup = await _build_force_sub_prompt(context.bot, channels)
+        sent = await update.message.reply_text(sub_text, reply_markup=markup)
         schedule_auto_delete(context.bot, sent.chat_id, sent.message_id)
         return
 

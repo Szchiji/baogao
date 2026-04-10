@@ -52,16 +52,9 @@ def db_connection():
 
 def init_db() -> None:
     with db_connection() as conn:
-        # Drop all existing tables and recreate fresh with the latest schema.
-        conn.execute("DROP TABLE IF EXISTS blacklist")
-        conn.execute("DROP TABLE IF EXISTS users")
-        conn.execute("DROP TABLE IF EXISTS reports")
-        conn.execute("DROP SEQUENCE IF EXISTS reports_id_seq")
-        conn.execute("DROP TABLE IF EXISTS settings")
-
         conn.execute(
             """
-            CREATE TABLE settings (
+            CREATE TABLE IF NOT EXISTS settings (
               key TEXT PRIMARY KEY,
               value TEXT NOT NULL
             )
@@ -69,7 +62,7 @@ def init_db() -> None:
         )
         conn.execute(
             """
-            CREATE TABLE reports (
+            CREATE TABLE IF NOT EXISTS reports (
               id SERIAL PRIMARY KEY,
               user_id BIGINT NOT NULL,
               username TEXT,
@@ -84,11 +77,13 @@ def init_db() -> None:
             """
         )
         conn.execute(
-            "CREATE INDEX idx_reports_status ON reports(status, id DESC)"
+            """
+            CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status, id DESC)
+            """
         )
         conn.execute(
             """
-            CREATE TABLE users (
+            CREATE TABLE IF NOT EXISTS users (
               user_id BIGINT PRIMARY KEY,
               username TEXT,
               first_seen TEXT NOT NULL,
@@ -98,7 +93,7 @@ def init_db() -> None:
         )
         conn.execute(
             """
-            CREATE TABLE blacklist (
+            CREATE TABLE IF NOT EXISTS blacklist (
               user_id BIGINT PRIMARY KEY,
               username TEXT,
               reason TEXT,
@@ -106,7 +101,10 @@ def init_db() -> None:
             )
             """
         )
+        # Insert default settings only if they don't already exist, so existing
+        # configured values are never overwritten on restart/redeploy.
         for key, value in DEFAULT_SETTINGS.items():
             conn.execute(
-                "INSERT INTO settings (key, value) VALUES (%s, %s)", (key, value)
+                "INSERT INTO settings (key, value) VALUES (%s, %s) ON CONFLICT (key) DO NOTHING",
+                (key, value),
             )
