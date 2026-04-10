@@ -946,6 +946,26 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
           <div id="push-fields-add-area" style="margin-top:8px"></div>
           <input type="hidden" name="push_detail_fields_json" id="push_detail_fields_json">
         </div>
+        <div class="field">
+          <label>推送图片 — 开关</label>
+          <label style="display:flex;align-items:center;gap:8px;font-weight:normal;font-size:.88rem;cursor:pointer;text-transform:none;letter-spacing:0;color:#374151">
+            <input type="checkbox" name="push_photos_enabled" value="1"{'checked' if settings_map.get('push_photos_enabled','1') == '1' else ''}>
+            审核通过后，将报告中的图片字段也推送到频道
+          </label>
+          <div class="hint" style="margin-top:4px">开启后，文字推送完成后会依次发送图片字段；关闭则仅推送文字内容。</div>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>待审提醒 — 触发阈值（小时）</label>
+            <input type="number" name="pending_reminder_threshold_hours" value="{e('pending_reminder_threshold_hours') or '24'}" min="1" max="720" style="width:100px">
+            <div class="hint">报告待审超过此时长（小时）后向管理员发送提醒，默认 24。</div>
+          </div>
+          <div class="field">
+            <label>待审提醒 — 检查间隔（小时）</label>
+            <input type="number" name="pending_reminder_interval_hours" value="{e('pending_reminder_interval_hours') or '2'}" min="1" max="168" style="width:100px">
+            <div class="hint">每隔多少小时触发一次检查，默认 2。修改后需重启 Bot 生效。</div>
+          </div>
+        </div>
       </div>
     </div>
 

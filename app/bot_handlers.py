@@ -708,22 +708,23 @@ async def _push_report_to_channel(bot: Bot, report_id: int, report: dict) -> str
                         "UPDATE reports SET channel_message_link=%s WHERE id=%s",
                         (channel_link, report_id),
                     )
-            # Send photo fields to the channel after the text push
-            for f in tpl_fields:
-                if field_types.get(f["key"], "text") == "photo":
-                    photo_file_id = data_values.get(f["key"])
-                    if photo_file_id:
-                        try:
-                            await bot.send_photo(
-                                chat_id=push_channel,
-                                photo=photo_file_id,
-                                caption=f"📷 {html.escape(f['label'])} — 报告 #{report_id}",
-                            )
-                        except Exception:
-                            logger.warning(
-                                "failed to push photo field %s for report %s to channel %s",
-                                f["key"], report_id, push_channel, exc_info=True,
-                            )
+            # Send photo fields to the channel after the text push (if enabled)
+            if setting_get("push_photos_enabled", "1") == "1":
+                for f in tpl_fields:
+                    if field_types.get(f["key"], "text") == "photo":
+                        photo_file_id = data_values.get(f["key"])
+                        if photo_file_id:
+                            try:
+                                await bot.send_photo(
+                                    chat_id=push_channel,
+                                    photo=photo_file_id,
+                                    caption=f"📷 {html.escape(f['label'])} — 报告 #{report_id}",
+                                )
+                            except Exception:
+                                logger.warning(
+                                    "failed to push photo field %s for report %s to channel %s",
+                                    f["key"], report_id, push_channel, exc_info=True,
+                                )
         except Exception:
             logger.warning("failed to push report %s to channel %s", report_id, push_channel, exc_info=True)
     return first_channel_link
@@ -1191,8 +1192,12 @@ _AUTO_CLEANUP_FIRST = 3600            # 1 hour after start
 
 
 async def _pending_reminder_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Periodic job: notify admins of reports pending for over 24 hours."""
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    """Periodic job: notify admins of reports pending for longer than the configured threshold."""
+    try:
+        threshold_hours = int(setting_get("pending_reminder_threshold_hours", "24"))
+    except (ValueError, TypeError):
+        threshold_hours = 24
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=threshold_hours)).isoformat()
     try:
         with db_connection() as conn:
             rows = conn.execute(
@@ -1209,7 +1214,7 @@ async def _pending_reminder_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     if count > 5:
         ids_str += f" 等共 {count} 条"
     msg = (
-        f"⏰ 提醒：有 {count} 条报告待审核超过 24 小时\n"
+        f"⏰ 提醒：有 {count} 条报告待审核超过 {threshold_hours} 小时\n"
         f"{ids_str}\n\n"
         f"请前往管理后台或使用 /pending 命令处理。"
     )
@@ -1279,9 +1284,16 @@ def create_bot_application(token: str) -> Application:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
     if app.job_queue is not None:
-        # Remind admins every 2 hours about pending reports older than 24 hours (start after 5 min)
+        # Read the reminder check interval from DB (or env) at startup; default 2 h
+        try:
+            _reminder_interval_hours = int(setting_get("pending_reminder_interval_hours", str(_PENDING_REMINDER_INTERVAL // 3600)))
+        except (ValueError, TypeError):
+            _reminder_interval_hours = _PENDING_REMINDER_INTERVAL // 3600
+        _reminder_interval_hours = max(1, _reminder_interval_hours)
+        reminder_interval_seconds = _reminder_interval_hours * 3600
+        # Remind admins about pending reports (start after 5 min)
         app.job_queue.run_repeating(
-            _pending_reminder_job, interval=_PENDING_REMINDER_INTERVAL, first=_PENDING_REMINDER_FIRST
+            _pending_reminder_job, interval=reminder_interval_seconds, first=_PENDING_REMINDER_FIRST
         )
         # Clean up old rejected reports once a day (start after 1 hour)
         app.job_queue.run_repeating(

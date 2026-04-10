@@ -43,6 +43,9 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "search_help_text": "发送 @用户名 或 #标签 查询报告。",
     "report_link_base": "",
     "push_detail_fields_json": "[]",
+    "push_photos_enabled": "1",
+    "pending_reminder_threshold_hours": "24",
+    "pending_reminder_interval_hours": "2",
 }
 
 

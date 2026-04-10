@@ -320,6 +320,9 @@ input[type=password]:focus{outline:none;border-color:#4f46e5;box-shadow:0 0 0 3p
         push_template: str = Form(""),
         report_template_json: str = Form("{}"),
         push_detail_fields_json: str = Form("[]"),
+        push_photos_enabled: str = Form(""),
+        pending_reminder_threshold_hours: str = Form(""),
+        pending_reminder_interval_hours: str = Form(""),
         contact_text: str = Form(""),
         usage_text: str = Form(""),
         search_help_text: str = Form(""),
@@ -343,6 +346,14 @@ input[type=password]:focus{outline:none;border-color:#4f46e5;box-shadow:0 0 0 3p
         if not isinstance(push_detail_fields_obj, list):
             push_detail_fields_obj = []
 
+        # Validate numeric fields
+        def _safe_int(value: str, default: int, min_val: int, max_val: int) -> str:
+            try:
+                v = int(value.strip())
+                return str(max(min_val, min(max_val, v)))
+            except (ValueError, AttributeError):
+                return str(default)
+
         updates = {
             "force_sub_channel": force_sub_channel.strip(),
             "push_channel": push_channel.strip(),
@@ -356,6 +367,9 @@ input[type=password]:focus{outline:none;border-color:#4f46e5;box-shadow:0 0 0 3p
             "push_template": push_template,
             "report_template_json": json.dumps(report_template_obj, ensure_ascii=False),
             "push_detail_fields_json": json.dumps(push_detail_fields_obj, ensure_ascii=False),
+            "push_photos_enabled": "1" if push_photos_enabled.strip() == "1" else "0",
+            "pending_reminder_threshold_hours": _safe_int(pending_reminder_threshold_hours, 24, 1, 720),
+            "pending_reminder_interval_hours": _safe_int(pending_reminder_interval_hours, 2, 1, 168),
             "contact_text": contact_text,
             "usage_text": usage_text,
             "search_help_text": search_help_text,
