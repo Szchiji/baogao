@@ -58,22 +58,32 @@ def report_template() -> dict[str, Any]:
     return {"name": str(data.get("name", "模板")), "fields": valid_fields}
 
 
-def _make_field_prompt(field: dict[str, Any], sequential: bool = True) -> tuple[str, "InlineKeyboardMarkup"]:
+def _make_field_prompt(
+    field: dict[str, Any],
+    sequential: bool = True,
+    current_idx: int = 0,
+    total: int = 0,
+    prev_key: str | None = None,
+) -> tuple[str, "InlineKeyboardMarkup"]:
     """Return (prompt_text, markup) for prompting a field value. Always includes a cancel button."""
     label = field["label"]
     hint = field.get("hint", "")
     field_type = field.get("type", "text")
     required = field.get("required", True)
 
+    progress = f"（第 {current_idx + 1} / {total} 项）\n" if total > 0 else ""
+
     if field_type == "photo":
-        prompt = f"请发送「{label}」的图片"
+        prompt = f"{progress}请发送「{label}」的图片"
     else:
-        prompt = f"请输入「{label}」"
+        prompt = f"{progress}请输入「{label}」"
 
     if hint:
         prompt += f"\n\n💡 {hint}"
 
     buttons: list[list[InlineKeyboardButton]] = []
+    if prev_key and sequential:
+        buttons.append([InlineKeyboardButton("← 返回上一项", callback_data=f"back_field:{prev_key}")])
     if not required and sequential:
         prompt += "\n\n（此项为可选，可跳过不填写）"
         buttons.append([InlineKeyboardButton("⏭ 跳过此项", callback_data=f"skip_field:{field['key']}")])

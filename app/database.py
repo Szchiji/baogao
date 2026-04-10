@@ -101,6 +101,18 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS audit_log (
+              id SERIAL PRIMARY KEY,
+              admin_id BIGINT NOT NULL,
+              action TEXT NOT NULL,
+              report_id INT,
+              note TEXT,
+              created_at TEXT NOT NULL
+            )
+            """
+        )
         # Insert default settings only if they don't already exist, so existing
         # configured values are never overwritten on restart/redeploy.
         for key, value in DEFAULT_SETTINGS.items():

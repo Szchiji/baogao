@@ -18,6 +18,7 @@ DEFAULT_SETTINGS: dict[str, str] = {
         [
             {"text": "写报告", "action": "write_report"},
             {"text": "查阅报告", "action": "search_help"},
+            {"text": "我的报告", "action": "my_reports"},
             {"text": "联系管理员", "action": "contact"},
             {"text": "操作方式", "action": "usage"},
         ],

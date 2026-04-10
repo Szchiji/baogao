@@ -57,3 +57,39 @@ def ban_user(user_id: int, username: str | None, reason: str) -> None:
 def unban_user(user_id: int) -> None:
     with db_connection() as conn:
         conn.execute("DELETE FROM blacklist WHERE user_id = %s", (user_id,))
+
+
+def log_audit(admin_id: int, action: str, report_id: int | None = None, note: str = "") -> None:
+    """Record an admin action in the audit log."""
+    now = utc_now_iso()
+    with db_connection() as conn:
+        conn.execute(
+            "INSERT INTO audit_log (admin_id, action, report_id, note, created_at) VALUES (%s, %s, %s, %s, %s)",
+            (admin_id, action, report_id, note or None, now),
+        )
+
+
+def get_user_reports(user_id: int, offset: int = 0, limit: int = 5) -> list:
+    """Return *limit+1* reports for *user_id* starting at *offset* (to detect has_more)."""
+    with db_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, tag, status, created_at, review_feedback
+            FROM reports WHERE user_id = %s
+            ORDER BY id DESC LIMIT %s OFFSET %s
+            """,
+            (user_id, limit + 1, offset),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def is_rate_limited_submission(user_id: int, window_seconds: int = 3600, max_count: int = 3) -> bool:
+    """Return True when the user has submitted >= *max_count* reports within the last *window_seconds*."""
+    from datetime import datetime, timezone, timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=window_seconds)).isoformat()
+    with db_connection() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) as cnt FROM reports WHERE user_id = %s AND created_at > %s",
+            (user_id, cutoff),
+        ).fetchone()
+    return (row["cnt"] if row else 0) >= max_count

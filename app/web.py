@@ -1,5 +1,7 @@
 import asyncio
+import csv
 import html
+import io
 import json
 import logging
 import secrets
@@ -22,9 +24,9 @@ from app.admin_auth import (
     _VERIFY_CODE_TTL,
 )
 from app.admin_panel import build_admin_html, report_to_html
-from app.bot_handlers import _build_approval_feedback, _push_report_to_channel
+from app.bot_handlers import _build_approval_feedback, _build_reject_markup, _push_report_to_channel
 from app.config import AppConfig, DEFAULT_SETTINGS
-from app.crud import ban_user, setting_get, setting_set, unban_user
+from app.crud import ban_user, log_audit, setting_get, setting_set, unban_user
 from app.database import db_connection
 from app.utils import parse_json, safe_format, utc_now_iso
 
@@ -162,7 +164,13 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
 
     @web.get("/healthz")
     async def healthz():
-        return {"ok": True}
+        try:
+            with db_connection() as conn:
+                conn.execute("SELECT 1")
+            return {"ok": True, "db": "ok"}
+        except Exception as exc:
+            logger.warning("healthz: DB check failed: %s", exc)
+            return JSONResponse({"ok": False, "db": str(exc)}, status_code=503)
 
     @web.get("/reports/{report_id}", response_class=HTMLResponse)
     async def report_detail(report_id: str):
@@ -545,6 +553,7 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
                 "UPDATE reports SET status='approved', reviewed_at=%s WHERE id = %s",
                 (utc_now_iso(), report_id),
             )
+        log_audit(0, "web_approve", int(report_id))
         try:
             channel_link = await _push_report_to_channel(web.state.tg_application.bot, report_id, report)
         except Exception:
@@ -571,16 +580,89 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
                 "UPDATE reports SET status='rejected', review_feedback=%s, reviewed_at=%s WHERE id = %s",
                 (reason.strip() or "请联系管理员", utc_now_iso(), report_id),
             )
+        log_audit(0, "web_reject", int(report_id), note=reason.strip())
         tpl = (
             setting_get("review_rejected_template", "").strip()
             or DEFAULT_SETTINGS["review_rejected_template"]
         )
         feedback = safe_format(tpl, id=report_id, reason=reason.strip() or "请联系管理员")
         try:
-            await web.state.tg_application.bot.send_message(chat_id=report["user_id"], text=feedback)
+            await web.state.tg_application.bot.send_message(
+                chat_id=report["user_id"], text=feedback,
+                reply_markup=_build_reject_markup(int(report_id)),
+            )
         except Exception:
             logger.warning("failed to notify user %s of rejection", report["user_id"], exc_info=True)
         return RedirectResponse(url="/admin?tab=pending", status_code=303)
+
+    @web.post("/admin/batch-approve")
+    async def web_batch_approve(request: Request, ids: str = Form("")):
+        """Approve all specified pending report IDs in one go."""
+        if redirect := _auth(request):
+            return redirect
+        id_list = [i.strip() for i in ids.split(",") if i.strip().isdigit()]
+        for report_id in id_list:
+            try:
+                with db_connection() as conn:
+                    report = conn.execute(
+                        "SELECT * FROM reports WHERE id = %s AND status = 'pending'", (report_id,)
+                    ).fetchone()
+                    if not report:
+                        continue
+                    conn.execute(
+                        "UPDATE reports SET status='approved', reviewed_at=%s WHERE id = %s",
+                        (utc_now_iso(), report_id),
+                    )
+                log_audit(0, "web_batch_approve", int(report_id))
+                try:
+                    channel_link = await _push_report_to_channel(
+                        web.state.tg_application.bot, report_id, report
+                    )
+                except Exception:
+                    logger.warning("batch approve: push failed for report %s", report_id, exc_info=True)
+                    channel_link = ""
+                feedback = _build_approval_feedback(report_id, channel_link=channel_link)
+                try:
+                    await web.state.tg_application.bot.send_message(
+                        chat_id=report["user_id"], text=feedback
+                    )
+                except Exception:
+                    logger.warning(
+                        "batch approve: notify failed for user %s", report["user_id"], exc_info=True
+                    )
+            except Exception:
+                logger.warning("batch approve: error processing report %s", report_id, exc_info=True)
+        return RedirectResponse(url="/admin?tab=pending", status_code=303)
+
+    @web.get("/admin/export-reports")
+    async def export_reports(request: Request):
+        """Export all reports as a CSV file."""
+        if redirect := _auth(request):
+            return redirect
+        with db_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, user_id, username, tag, data_json, status,
+                       review_feedback, created_at, reviewed_at
+                FROM reports ORDER BY id DESC
+                """
+            ).fetchall()
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["id", "user_id", "username", "tag", "data_json",
+                         "status", "review_feedback", "created_at", "reviewed_at"])
+        for row in rows:
+            writer.writerow([
+                row["id"], row["user_id"], row["username"], row["tag"],
+                row["data_json"], row["status"], row["review_feedback"] or "",
+                row["created_at"], row["reviewed_at"] or "",
+            ])
+        content = output.getvalue()
+        return Response(
+            content=content.encode("utf-8-sig"),  # utf-8-sig for Excel compatibility
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=reports.csv"},
+        )
 
     @web.post("/admin/broadcast")
     async def admin_broadcast(

@@ -251,6 +251,7 @@ _ADMIN_JS = """
   var KB_ACTIONS=[
     {value:'write_report',label:'写报告（内置）'},
     {value:'search_help',label:'查阅报告（内置）'},
+    {value:'my_reports',label:'我的报告（内置）'},
     {value:'contact',label:'联系管理员（内置）'},
     {value:'usage',label:'操作方式（内置）'},
     {value:'text',label:'自定义回复文本'}
@@ -636,6 +637,7 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
 
     if pending_reports:
         tpl_fields = report_template()["fields"]
+        all_pending_ids = ",".join(str(r["id"]) for r in pending_reports)
         rows_html = ""
         for r in pending_reports:
             content_html = _render_report_content_for_admin(r.get("data_json", "{}"), tpl_fields)
@@ -654,9 +656,11 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
                 "</td></tr>"
             )
         pending_html = (
-            "<div style='margin-bottom:12px'>"
+            f"<form method='post' action='/admin/batch-approve' style='margin-bottom:12px;display:flex;align-items:center;gap:10px'>"
+            f"<input type='hidden' name='ids' value='{html.escape(all_pending_ids)}'>"
+            f"<button class='btn btn-success' type='submit' onclick=\"return confirm('确认全部通过 {pending_count} 条待审核报告？')\">✅ 全部通过（{pending_count}条）</button>"
             "<a href='/admin#tab=pending' onclick='location.reload();return false;' style='font-size:.85rem;color:#2563eb;text-decoration:none'>🔄 刷新列表</a>"
-            "</div>"
+            "</form>"
             "<table class='table'><thead><tr>"
             "<th>ID</th><th>用户</th><th>提交时间</th><th>报告内容</th><th>操作</th>"
             "</tr></thead><tbody>" + rows_html + "</tbody></table>"
@@ -966,10 +970,11 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
     <div id="pane-reports" class="tab-pane">
       <p class="section-title">报告历史（共 {total_reports} 条）</p>
       <div class="card" style="padding:0;overflow:hidden">
-        <div style="padding:14px 18px;border-bottom:1px solid var(--bdr);display:flex;align-items:center;gap:12px">
+        <div style="padding:14px 18px;border-bottom:1px solid var(--bdr);display:flex;align-items:center;gap:12px;flex-wrap:wrap">
           <span style="font-size:.85rem;color:var(--txt2)">
             ✅ 已通过 {approved_count} &nbsp; ❌ 已驳回 {rejected_count} &nbsp; ⏳ 待审核 {pending_count}
           </span>
+          <a href="/admin/export-reports" class="btn btn-secondary btn-sm" style="text-decoration:none;margin-left:auto">⬇️ 导出 CSV</a>
         </div>
         {all_reports_html}
       </div>
