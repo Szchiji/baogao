@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import sys
 
 import uvicorn
 from telegram.ext import Application
@@ -14,6 +15,7 @@ from app.web import create_fastapi
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
+    stream=sys.stdout,
 )
 logger = logging.getLogger("report-bot")
 logging.getLogger("httpx").setLevel(logging.WARNING)
