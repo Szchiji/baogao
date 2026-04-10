@@ -118,7 +118,14 @@ def init_db() -> None:
         # This must run before ADD COLUMN operations to avoid a conflict where ADD COLUMN
         # creates the snake_case column and then the subsequent RENAME fails because the
         # target already exists.
-        for old_col, new_col in [("createdAt", "created_at"), ("reviewedAt", "reviewed_at")]:
+        for old_col, new_col in [
+            ("userId", "user_id"),
+            ("dataJson", "data_json"),
+            ("reviewFeedback", "review_feedback"),
+            ("channelMessageLink", "channel_message_link"),
+            ("createdAt", "created_at"),
+            ("reviewedAt", "reviewed_at"),
+        ]:
             has_camel = conn.execute(
                 """
                 SELECT 1 FROM information_schema.columns
