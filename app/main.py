@@ -229,8 +229,14 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status, id DESC)"
         )
         # Migration: add missing columns if they do not exist yet
+        conn.execute("ALTER TABLE reports ADD COLUMN IF NOT EXISTS user_id BIGINT")
+        conn.execute("ALTER TABLE reports ADD COLUMN IF NOT EXISTS username TEXT")
         conn.execute("ALTER TABLE reports ADD COLUMN IF NOT EXISTS tag TEXT")
         conn.execute("ALTER TABLE reports ADD COLUMN IF NOT EXISTS data_json TEXT")
+        conn.execute("ALTER TABLE reports ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending'")
+        conn.execute("ALTER TABLE reports ADD COLUMN IF NOT EXISTS review_feedback TEXT")
+        conn.execute("ALTER TABLE reports ADD COLUMN IF NOT EXISTS created_at TEXT")
+        conn.execute("ALTER TABLE reports ADD COLUMN IF NOT EXISTS reviewed_at TEXT")
         conn.execute("ALTER TABLE reports ADD COLUMN IF NOT EXISTS channel_message_link TEXT")
         # Migration: rename camelCase columns to snake_case if they exist (legacy schema)
         for old_col, new_col in [("createdAt", "created_at"), ("reviewedAt", "reviewed_at")]:
