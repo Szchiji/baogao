@@ -1,3 +1,4 @@
+import asyncio
 import html
 import json
 import logging
@@ -44,6 +45,8 @@ from app.keyboards import (
     _make_field_prompt,
     _report_submit_keyboard,
     build_channel_link,
+    get_force_sub_channels,
+    get_push_channels,
     is_subscribed,
     keyboard_config,
     render_report_preview,
@@ -54,6 +57,33 @@ from app.keyboards import (
 from app.utils import parse_json, safe_format, utc_now_iso
 
 logger = logging.getLogger("report-bot")
+
+_AUTO_DELETE_DELAY = 86400  # 24 hours in seconds
+
+
+async def _delete_after(bot: Bot, chat_id: int, message_id: int, delay: int) -> None:
+    """Delete a message after *delay* seconds. Errors are silently ignored."""
+    await asyncio.sleep(delay)
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        logger.debug(
+            "auto-delete skipped for chat_id=%s message_id=%s (message may already be gone)",
+            chat_id, message_id,
+        )
+
+
+def schedule_auto_delete(bot: Bot, chat_id: int, message_id: int, delay: int = _AUTO_DELETE_DELAY) -> None:
+    """Schedule a message for deletion after *delay* seconds (default 24 h)."""
+    try:
+        asyncio.get_running_loop().create_task(
+            _delete_after(bot, chat_id, message_id, delay)
+        )
+    except RuntimeError:
+        logger.debug(
+            "schedule_auto_delete: no running event loop; skipping delete for chat_id=%s message_id=%s",
+            chat_id, message_id,
+        )
 
 
 async def send_start_content(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -96,14 +126,18 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if is_user_banned(user_id):
         await update.effective_chat.send_message("您已被限制使用此机器人。")
         return
-    channel = setting_get("force_sub_channel", "").strip()
-    if channel and not await is_subscribed(context.bot, user_id):
-        rows = [[InlineKeyboardButton("我已订阅，重新检测", callback_data="retry_sub")]]
-        channel_link = build_channel_link(channel)
-        if channel_link:
-            rows.insert(0, [InlineKeyboardButton("先去订阅", url=channel_link)])
+    channels = get_force_sub_channels()
+    if channels and not await is_subscribed(context.bot, user_id):
+        rows: list[list[InlineKeyboardButton]] = []
+        for i, ch in enumerate(channels):
+            link = build_channel_link(ch)
+            if link:
+                label = f"先去订阅频道 {i + 1}" if len(channels) > 1 else "先去订阅"
+                rows.append([InlineKeyboardButton(label, url=link)])
+        rows.append([InlineKeyboardButton("我已订阅，重新检测", callback_data="retry_sub")])
         markup = InlineKeyboardMarkup(rows)
-        await update.effective_chat.send_message("请先订阅频道后再使用机器人。", reply_markup=markup)
+        sent = await update.effective_chat.send_message("请先订阅频道后再使用机器人。", reply_markup=markup)
+        schedule_auto_delete(context.bot, sent.chat_id, sent.message_id)
         return
     await send_start_content(update, context)
 
@@ -149,6 +183,7 @@ async def write_report_flow(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     )
     draft["prompt_msg_id"] = sent.message_id
     draft["prompt_chat_id"] = update.effective_chat.id
+    schedule_auto_delete(context.bot, sent.chat_id, sent.message_id)
 
 
 async def query_reports(text: str) -> str:
@@ -226,14 +261,18 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("您已被限制使用此机器人。")
         return
 
-    channel = setting_get("force_sub_channel", "").strip()
-    if channel and not await is_subscribed(context.bot, update.effective_user.id):
-        rows = [[InlineKeyboardButton("我已订阅，重新检测", callback_data="retry_sub")]]
-        channel_link = build_channel_link(channel)
-        if channel_link:
-            rows.insert(0, [InlineKeyboardButton("先去订阅", url=channel_link)])
+    channels = get_force_sub_channels()
+    if channels and not await is_subscribed(context.bot, update.effective_user.id):
+        rows: list[list[InlineKeyboardButton]] = []
+        for i, ch in enumerate(channels):
+            link = build_channel_link(ch)
+            if link:
+                label = f"先去订阅频道 {i + 1}" if len(channels) > 1 else "先去订阅"
+                rows.append([InlineKeyboardButton(label, url=link)])
+        rows.append([InlineKeyboardButton("我已订阅，重新检测", callback_data="retry_sub")])
         markup = InlineKeyboardMarkup(rows)
-        await update.message.reply_text("请先订阅频道后再使用机器人。", reply_markup=markup)
+        sent = await update.message.reply_text("请先订阅频道后再使用机器人。", reply_markup=markup)
+        schedule_auto_delete(context.bot, sent.chat_id, sent.message_id)
         return
 
     # Admin reject-reason flow: only when admin is NOT mid-draft to avoid ambiguity
@@ -263,8 +302,10 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             or DEFAULT_SETTINGS["review_rejected_template"]
         )
         feedback = safe_format(tpl, id=pending_reject_id, reason=reason)
-        await context.bot.send_message(chat_id=report["user_id"], text=feedback)
-        await update.message.reply_text(f"报告 #{pending_reject_id} 已驳回。")
+        sent_feedback = await context.bot.send_message(chat_id=report["user_id"], text=feedback)
+        schedule_auto_delete(context.bot, sent_feedback.chat_id, sent_feedback.message_id)
+        sent_admin_reply = await update.message.reply_text(f"报告 #{pending_reject_id} 已驳回。")
+        schedule_auto_delete(context.bot, sent_admin_reply.chat_id, sent_admin_reply.message_id)
         return
 
     draft = context.user_data.get("report_draft")
@@ -294,13 +335,15 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 sent = await update.message.reply_text(prompt, reply_markup=markup)
                 draft["prompt_msg_id"] = sent.message_id
                 draft["prompt_chat_id"] = update.effective_chat.id
+                schedule_auto_delete(context.bot, sent.chat_id, sent.message_id)
                 return
 
-        await update.message.reply_text(
+        sent_preview = await update.message.reply_text(
             render_report_preview(draft["values"], draft["template"]),
             parse_mode=ParseMode.HTML,
             reply_markup=_report_submit_keyboard(),
         )
+        schedule_auto_delete(context.bot, sent_preview.chat_id, sent_preview.message_id)
         return
 
     # Verify code check (only when not in a draft/admin flow)
@@ -393,13 +436,19 @@ async def submit_report(context: ContextTypes.DEFAULT_TYPE, update: Update) -> N
         await update.effective_chat.send_message("❌ 提交失败，请稍后重试。")
         return
     context.user_data.pop("report_draft", None)
-    await update.effective_chat.send_message(f"✅ 报告 #{report_id} 已提交，等待审核。")
+    sent_confirm = await update.effective_chat.send_message(f"✅ 报告 #{report_id} 已提交，等待审核。")
+    schedule_auto_delete(context.bot, sent_confirm.chat_id, sent_confirm.message_id)
 
     # Notify all admins with inline approve/reject buttons
     admin_ids = get_admin_user_ids()
     if admin_ids:
         preview = render_report_preview(values, template)
-        notification = f"📋 新报告待审核 #{report_id}\n用户：@{html.escape(username or '未知')}\n\n{preview}"
+        submitter_id = update.effective_user.id
+        notification = (
+            f"📋 新报告待审核 #{report_id}\n"
+            f"用户：@{html.escape(username or '未知')}（ID: {submitter_id}）\n\n"
+            f"{preview}"
+        )
         review_buttons = InlineKeyboardMarkup(
             [
                 [
@@ -410,21 +459,25 @@ async def submit_report(context: ContextTypes.DEFAULT_TYPE, update: Update) -> N
         )
         for admin_id in admin_ids:
             try:
-                await context.bot.send_message(
+                sent_notif = await context.bot.send_message(
                     chat_id=admin_id,
                     text=notification,
                     parse_mode=ParseMode.HTML,
                     reply_markup=review_buttons,
                 )
+                schedule_auto_delete(context.bot, sent_notif.chat_id, sent_notif.message_id)
                 # Also send photo fields so the admin can review images
                 for field in template["fields"]:
                     if field.get("type") == "photo":
                         photo_file_id = values.get(field["key"])
                         if photo_file_id:
-                            await context.bot.send_photo(
+                            sent_photo = await context.bot.send_photo(
                                 chat_id=admin_id,
                                 photo=photo_file_id,
                                 caption=f"📷 {html.escape(field['label'])}（报告 #{report_id}）",
+                            )
+                            schedule_auto_delete(
+                                context.bot, sent_photo.chat_id, sent_photo.message_id
                             )
             except Exception:
                 logger.warning(
@@ -466,9 +519,9 @@ def _build_channel_message_link(channel: str, message_id: int) -> str:
 
 
 async def _push_report_to_channel(bot: Bot, report_id: int, report: dict) -> str:
-    """Push *report* to the configured channel.  Returns the channel message link (or '')."""
-    push_channel = setting_get("push_channel", "").strip()
-    if not push_channel:
+    """Push *report* to all configured push channels.  Returns the first channel message link (or '')."""
+    push_channels = get_push_channels()
+    if not push_channels:
         return ""
     data_values = parse_json(report["data_json"], {})
     link_base = setting_get("report_link_base", "").strip()
@@ -508,19 +561,21 @@ async def _push_report_to_channel(bot: Bot, report_id: int, report: dict) -> str
         "link": link,
     })
     push_text = safe_format(push_tpl, **format_kwargs)
-    try:
-        msg = await bot.send_message(chat_id=push_channel, text=push_text)
-        channel_link = _build_channel_message_link(push_channel, msg.message_id)
-        if channel_link:
-            with db_connection() as conn:
-                conn.execute(
-                    "UPDATE reports SET channel_message_link=%s WHERE id=%s",
-                    (channel_link, report_id),
-                )
-        return channel_link
-    except Exception:
-        logger.warning("failed to push report %s to channel", report_id, exc_info=True)
-        return ""
+    first_channel_link = ""
+    for push_channel in push_channels:
+        try:
+            msg = await bot.send_message(chat_id=push_channel, text=push_text)
+            channel_link = _build_channel_message_link(push_channel, msg.message_id)
+            if channel_link and not first_channel_link:
+                first_channel_link = channel_link
+                with db_connection() as conn:
+                    conn.execute(
+                        "UPDATE reports SET channel_message_link=%s WHERE id=%s",
+                        (channel_link, report_id),
+                    )
+        except Exception:
+            logger.warning("failed to push report %s to channel %s", report_id, push_channel, exc_info=True)
+    return first_channel_link
 
 
 async def pending_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -645,10 +700,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if data == "retry_sub":
         await query.answer()
         if await is_subscribed(context.bot, update.effective_user.id):
-            await query.message.reply_text("订阅检测通过。")
+            sent_ok = await query.message.reply_text("订阅检测通过。")
+            schedule_auto_delete(context.bot, sent_ok.chat_id, sent_ok.message_id)
             await send_start_content(update, context)
         else:
-            await query.message.reply_text("检测失败，请确认订阅后重试。")
+            sent_fail = await query.message.reply_text("检测失败，请确认订阅后重试。")
+            schedule_auto_delete(context.bot, sent_fail.chat_id, sent_fail.message_id)
         return
 
     draft = context.user_data.get("report_draft")
@@ -674,7 +731,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         draft["awaiting"] = key
         draft["sequential"] = False
         prompt, markup = _make_field_prompt(field, sequential=False)
-        await query.message.reply_text(prompt, reply_markup=markup)
+        sent = await query.message.reply_text(prompt, reply_markup=markup)
+        schedule_auto_delete(context.bot, sent.chat_id, sent.message_id)
         return
 
     if data.startswith("skip_field:"):
@@ -697,12 +755,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             sent = await query.message.reply_text(prompt, reply_markup=markup)
             draft["prompt_msg_id"] = sent.message_id
             draft["prompt_chat_id"] = query.message.chat_id
+            schedule_auto_delete(context.bot, sent.chat_id, sent.message_id)
         else:
-            await query.message.reply_text(
+            sent_preview = await query.message.reply_text(
                 render_report_preview(draft["values"], draft["template"]),
                 parse_mode=ParseMode.HTML,
                 reply_markup=_report_submit_keyboard(),
             )
+            schedule_auto_delete(context.bot, sent_preview.chat_id, sent_preview.message_id)
         return
 
     if data == "submit_report":
@@ -710,8 +770,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if is_user_banned(update.effective_user.id):
             await query.message.reply_text("您已被限制使用此机器人。")
             return
-        sub_channel = setting_get("force_sub_channel", "").strip()
-        if sub_channel and not await is_subscribed(context.bot, update.effective_user.id):
+        if get_force_sub_channels() and not await is_subscribed(context.bot, update.effective_user.id):
             await query.message.reply_text("请先订阅频道后再提交报告。")
             return
         await submit_report(context, update)
@@ -743,10 +802,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await query.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
-        await query.message.reply_text(f"✅ 报告 #{report_id} 已通过审核。")
+        sent_admin = await query.message.reply_text(f"✅ 报告 #{report_id} 已通过审核。")
+        schedule_auto_delete(context.bot, sent_admin.chat_id, sent_admin.message_id)
         channel_link = await _push_report_to_channel(context.bot, report_id, report)
         feedback = _build_approval_feedback(report_id, channel_link=channel_link)
-        await context.bot.send_message(chat_id=report["user_id"], text=feedback)
+        sent_user = await context.bot.send_message(chat_id=report["user_id"], text=feedback)
+        schedule_auto_delete(context.bot, sent_user.chat_id, sent_user.message_id)
         return
 
     if data.startswith("reject:"):
@@ -768,7 +829,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         context.user_data["pending_reject_id"] = report_id
         await query.answer()
-        await query.message.reply_text(f"请输入驳回报告 #{report_id} 的原因：")
+        sent_prompt = await query.message.reply_text(f"请输入驳回报告 #{report_id} 的原因：")
+        schedule_auto_delete(context.bot, sent_prompt.chat_id, sent_prompt.message_id)
         return
 
     # Fallback: answer unhandled callback queries to avoid Telegram timeout errors
@@ -786,14 +848,18 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("您已被限制使用此机器人。")
         return
 
-    channel = setting_get("force_sub_channel", "").strip()
-    if channel and not await is_subscribed(context.bot, user.id):
-        rows = [[InlineKeyboardButton("我已订阅，重新检测", callback_data="retry_sub")]]
-        channel_link = build_channel_link(channel)
-        if channel_link:
-            rows.insert(0, [InlineKeyboardButton("先去订阅", url=channel_link)])
+    channels = get_force_sub_channels()
+    if channels and not await is_subscribed(context.bot, user.id):
+        rows: list[list[InlineKeyboardButton]] = []
+        for i, ch in enumerate(channels):
+            link = build_channel_link(ch)
+            if link:
+                label = f"先去订阅频道 {i + 1}" if len(channels) > 1 else "先去订阅"
+                rows.append([InlineKeyboardButton(label, url=link)])
+        rows.append([InlineKeyboardButton("我已订阅，重新检测", callback_data="retry_sub")])
         markup = InlineKeyboardMarkup(rows)
-        await update.message.reply_text("请先订阅频道后再使用机器人。", reply_markup=markup)
+        sent = await update.message.reply_text("请先订阅频道后再使用机器人。", reply_markup=markup)
+        schedule_auto_delete(context.bot, sent.chat_id, sent.message_id)
         return
 
     draft = context.user_data.get("report_draft")
@@ -829,13 +895,15 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             sent = await update.message.reply_text(prompt, reply_markup=markup)
             draft["prompt_msg_id"] = sent.message_id
             draft["prompt_chat_id"] = update.effective_chat.id
+            schedule_auto_delete(context.bot, sent.chat_id, sent.message_id)
             return
 
-    await update.message.reply_text(
+    sent_preview = await update.message.reply_text(
         render_report_preview(draft["values"], draft["template"]),
         parse_mode=ParseMode.HTML,
         reply_markup=_report_submit_keyboard(),
     )
+    schedule_auto_delete(context.bot, sent_preview.chat_id, sent_preview.message_id)
 
 
 async def ptb_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:

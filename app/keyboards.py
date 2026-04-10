@@ -81,16 +81,37 @@ def _make_field_prompt(field: dict[str, Any], sequential: bool = True) -> tuple[
     return prompt, InlineKeyboardMarkup(buttons)
 
 
+def get_force_sub_channels() -> list[str]:
+    """Return the list of configured force-subscribe channel IDs / usernames."""
+    raw = setting_get("force_sub_channel", "").strip()
+    if not raw:
+        return []
+    return [c.strip() for c in raw.split(",") if c.strip()]
+
+
+def get_push_channels() -> list[str]:
+    """Return the list of configured push channel IDs / usernames."""
+    raw = setting_get("push_channel", "").strip()
+    if not raw:
+        return []
+    return [c.strip() for c in raw.split(",") if c.strip()]
+
+
 async def is_subscribed(bot: Bot, user_id: int) -> bool:
-    channel = setting_get("force_sub_channel", "").strip()
-    if not channel:
+    """Return True only when the user is subscribed to ALL force-subscribe channels."""
+    channels = get_force_sub_channels()
+    if not channels:
         return True
-    try:
-        member = await bot.get_chat_member(chat_id=channel, user_id=user_id)
-    except Exception:
-        logger.warning("subscription check failed for %s", user_id, exc_info=True)
-        return True
-    return member.status not in {"left", "kicked"}
+    for channel in channels:
+        try:
+            member = await bot.get_chat_member(chat_id=channel, user_id=user_id)
+            if member.status in {"left", "kicked"}:
+                return False
+        except Exception:
+            logger.warning(
+                "subscription check failed for channel %s user %s", channel, user_id, exc_info=True
+            )
+    return True
 
 
 def start_keyboard() -> ReplyKeyboardMarkup:
