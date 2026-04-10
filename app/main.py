@@ -230,6 +230,17 @@ def init_db() -> None:
         )
         # Migration: add channel_message_link column if it does not exist yet
         conn.execute("ALTER TABLE reports ADD COLUMN IF NOT EXISTS channel_message_link TEXT")
+        # Migration: rename camelCase columns to snake_case if they exist (legacy schema)
+        for old_col, new_col in [("createdAt", "created_at"), ("reviewedAt", "reviewed_at")]:
+            has_camel = conn.execute(
+                """
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'reports' AND column_name = %s
+                """,
+                (old_col,),
+            ).fetchone()
+            if has_camel:
+                conn.execute(f'ALTER TABLE reports RENAME COLUMN "{old_col}" TO "{new_col}"')
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
