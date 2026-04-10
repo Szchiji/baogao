@@ -89,7 +89,7 @@ async def is_subscribed(bot: Bot, user_id: int) -> bool:
         member = await bot.get_chat_member(chat_id=channel, user_id=user_id)
     except Exception:
         logger.warning("subscription check failed for %s", user_id, exc_info=True)
-        return False
+        return True
     return member.status not in {"left", "kicked"}
 
 
