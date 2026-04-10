@@ -80,42 +80,33 @@ def init_db() -> None:
         # Migration: ensure reports.id has a sequence-backed DEFAULT (tables migrated
         # from SQLite may have id as a plain INTEGER with no DEFAULT, causing NOT NULL
         # violations when omitting id from INSERT statements).
-        # Uses plain SQL instead of a PL/pgSQL DO block to avoid psycopg2 dollar-quote
-        # parsing edge-cases with the %% escape sequence.
-        has_seq_default = conn.execute(
+        # Runs unconditionally and is idempotent: CREATE SEQUENCE IF NOT EXISTS is a
+        # no-op when the sequence already exists, and ALTER COLUMN SET DEFAULT simply
+        # re-confirms the existing default.  Scoped to current_schema() to avoid
+        # false matches when information_schema returns rows from other schemas.
+        is_integer_id = conn.execute(
             """
             SELECT 1 FROM information_schema.columns
-            WHERE table_name = 'reports'
+            WHERE table_schema = current_schema()
+              AND table_name = 'reports'
               AND column_name = 'id'
-              AND column_default LIKE %s
-            """,
-            ("nextval%",),
+              AND data_type IN ('integer', 'bigint', 'smallint')
+            """
         ).fetchone()
-        if not has_seq_default:
-            # Only applicable for integer-typed id columns.  If id is UUID (or any
-            # non-integer type) MAX(id) is undefined in PostgreSQL, so skip entirely.
-            is_integer_id = conn.execute(
+        if is_integer_id:
+            conn.execute("CREATE SEQUENCE IF NOT EXISTS reports_id_seq")
+            conn.execute(
                 """
-                SELECT 1 FROM information_schema.columns
-                WHERE table_name = 'reports'
-                  AND column_name = 'id'
-                  AND data_type IN ('integer', 'bigint', 'smallint')
+                SELECT setval(
+                    'reports_id_seq',
+                    COALESCE((SELECT MAX(id) FROM reports), 0) + 1,
+                    false
+                )
                 """
             ).fetchone()
-            if is_integer_id:
-                conn.execute("CREATE SEQUENCE IF NOT EXISTS reports_id_seq")
-                conn.execute(
-                    """
-                    SELECT setval(
-                        'reports_id_seq',
-                        COALESCE((SELECT MAX(id) FROM reports), 0) + 1,
-                        false
-                    )
-                    """
-                ).fetchone()
-                conn.execute(
-                    "ALTER TABLE reports ALTER COLUMN id SET DEFAULT nextval('reports_id_seq')"
-                )
+            conn.execute(
+                "ALTER TABLE reports ALTER COLUMN id SET DEFAULT nextval('reports_id_seq')"
+            )
         # Migration: rename camelCase columns to snake_case BEFORE adding new columns.
         # This must run before ADD COLUMN operations to avoid a conflict where ADD COLUMN
         # creates the snake_case column and then the subsequent RENAME fails because the
