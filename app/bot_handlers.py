@@ -86,17 +86,27 @@ def schedule_auto_delete(bot: Bot, chat_id: int, message_id: int, delay: int = _
         )
 
 
-def _build_force_sub_prompt(channels: list[str]) -> tuple[str, InlineKeyboardMarkup]:
+async def _build_force_sub_prompt(bot: Bot, channels: list[str]) -> tuple[str, InlineKeyboardMarkup]:
     """Build the subscription prompt message and inline keyboard for *channels*.
 
-    For channels that have a public t.me link an inline button is added.
-    Channel identifiers with no public link (e.g. private numeric IDs) are
-    listed in the message text so users still know what to subscribe to.
+    For public channels a direct t.me link is used.  For private channels
+    (numeric IDs) the bot fetches a Telegram invite link via the API so users
+    get a real join button.  If the invite-link export fails (e.g. the bot is
+    not an admin of that channel), the channel identifier is listed in the
+    message text as a fallback.
     """
     rows: list[list[InlineKeyboardButton]] = []
     no_link_channels: list[str] = []
     for i, ch in enumerate(channels):
         link = build_channel_link(ch)
+        if link is None:
+            # Private / numeric channel — try to fetch an invite link from Telegram.
+            try:
+                link = await bot.export_chat_invite_link(chat_id=ch)
+            except Exception:
+                logger.warning(
+                    "Could not export invite link for channel %s (bot may not be admin)", ch
+                )
         if link:
             label = f"先去订阅频道 {i + 1}" if len(channels) > 1 else "先去订阅"
             rows.append([InlineKeyboardButton(label, url=link)])
@@ -154,7 +164,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     channels = get_force_sub_channels()
     if channels and not await is_subscribed(context.bot, user_id):
-        text, markup = _build_force_sub_prompt(channels)
+        text, markup = await _build_force_sub_prompt(context.bot, channels)
         sent = await update.effective_chat.send_message(text, reply_markup=markup)
         schedule_auto_delete(context.bot, sent.chat_id, sent.message_id)
         return
@@ -282,7 +292,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     channels = get_force_sub_channels()
     if channels and not await is_subscribed(context.bot, update.effective_user.id):
-        text, markup = _build_force_sub_prompt(channels)
+        text, markup = await _build_force_sub_prompt(context.bot, channels)
         sent = await update.message.reply_text(text, reply_markup=markup)
         schedule_auto_delete(context.bot, sent.chat_id, sent.message_id)
         return
@@ -866,7 +876,7 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     channels = get_force_sub_channels()
     if channels and not await is_subscribed(context.bot, user.id):
-        sub_text, markup = _build_force_sub_prompt(channels)
+        sub_text, markup = await _build_force_sub_prompt(context.bot, channels)
         sent = await update.message.reply_text(sub_text, reply_markup=markup)
         schedule_auto_delete(context.bot, sent.chat_id, sent.message_id)
         return
