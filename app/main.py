@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 
 import psycopg2
 import psycopg2.extras
+import psycopg2.sql
 import uvicorn
 from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -100,7 +101,7 @@ class _PGConn:
         self._conn = raw_conn
         self._cur = raw_conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
-    def execute(self, sql: str, params: tuple = ()) -> Any:
+    def execute(self, sql: Any, params: tuple = ()) -> Any:
         self._cur.execute(sql, params)
         return self._cur
 
@@ -226,8 +227,9 @@ def init_db() -> None:
             """
         )
         # Migration: rename camelCase columns to snake_case BEFORE adding new columns.
-        # This must run first to avoid a conflict where ADD COLUMN creates the snake_case
-        # column and then the subsequent RENAME fails because the target already exists.
+        # This must run before ADD COLUMN operations to avoid a conflict where ADD COLUMN
+        # creates the snake_case column and then the subsequent RENAME fails because the
+        # target already exists.
         for old_col, new_col in [("createdAt", "created_at"), ("reviewedAt", "reviewed_at")]:
             has_camel = conn.execute(
                 """
@@ -246,13 +248,22 @@ def init_db() -> None:
                 ).fetchone()
                 if not has_target:
                     # Target column does not exist yet — safe to rename.
-                    conn.execute(f'ALTER TABLE reports RENAME COLUMN "{old_col}" TO "{new_col}"')
+                    conn.execute(
+                        psycopg2.sql.SQL("ALTER TABLE reports RENAME COLUMN {} TO {}").format(
+                            psycopg2.sql.Identifier(old_col),
+                            psycopg2.sql.Identifier(new_col),
+                        )
+                    )
                 else:
                     # Both camelCase and snake_case columns exist (zombie state from a
                     # previously interrupted migration).  The snake_case column is already
                     # used by all queries, so drop the now-unused camelCase column to
                     # eliminate its NOT NULL constraint that would otherwise break INSERTs.
-                    conn.execute(f'ALTER TABLE reports DROP COLUMN "{old_col}"')
+                    conn.execute(
+                        psycopg2.sql.SQL("ALTER TABLE reports DROP COLUMN {}").format(
+                            psycopg2.sql.Identifier(old_col),
+                        )
+                    )
         # Migration: add missing columns if they do not exist yet
         conn.execute("ALTER TABLE reports ADD COLUMN IF NOT EXISTS user_id BIGINT")
         conn.execute("ALTER TABLE reports ADD COLUMN IF NOT EXISTS username TEXT")
