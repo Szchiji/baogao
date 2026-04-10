@@ -92,19 +92,30 @@ def init_db() -> None:
             ("nextval%",),
         ).fetchone()
         if not has_seq_default:
-            conn.execute("CREATE SEQUENCE IF NOT EXISTS reports_id_seq")
-            conn.execute(
+            # Only applicable for integer-typed id columns.  If id is UUID (or any
+            # non-integer type) MAX(id) is undefined in PostgreSQL, so skip entirely.
+            is_integer_id = conn.execute(
                 """
-                SELECT setval(
-                    'reports_id_seq',
-                    COALESCE((SELECT MAX(id) FROM reports), 0) + 1,
-                    false
-                )
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'reports'
+                  AND column_name = 'id'
+                  AND data_type IN ('integer', 'bigint', 'smallint')
                 """
             ).fetchone()
-            conn.execute(
-                "ALTER TABLE reports ALTER COLUMN id SET DEFAULT nextval('reports_id_seq')"
-            )
+            if is_integer_id:
+                conn.execute("CREATE SEQUENCE IF NOT EXISTS reports_id_seq")
+                conn.execute(
+                    """
+                    SELECT setval(
+                        'reports_id_seq',
+                        COALESCE((SELECT MAX(id) FROM reports), 0) + 1,
+                        false
+                    )
+                    """
+                ).fetchone()
+                conn.execute(
+                    "ALTER TABLE reports ALTER COLUMN id SET DEFAULT nextval('reports_id_seq')"
+                )
         # Migration: rename camelCase columns to snake_case BEFORE adding new columns.
         # This must run before ADD COLUMN operations to avoid a conflict where ADD COLUMN
         # creates the snake_case column and then the subsequent RENAME fails because the
