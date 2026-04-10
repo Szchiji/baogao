@@ -52,10 +52,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica N
 .tab-pane.active{display:block}
 .section-title{font-size:.75rem;font-weight:700;color:var(--txt2);text-transform:uppercase;letter-spacing:.07em;margin-bottom:18px;padding-bottom:12px;border-bottom:1px solid var(--bdr)}
 .card{background:var(--card);border-radius:var(--r2);box-shadow:var(--sh);border:1px solid var(--bdr);padding:24px;margin-bottom:20px}
-.stats-row{display:flex;gap:16px;margin-bottom:24px;flex-wrap:wrap}
-.stat-card{flex:1;min-width:130px;background:var(--card);border:1px solid var(--bdr);border-radius:var(--r2);padding:20px;box-shadow:var(--sh)}
-.stat-val{font-size:2rem;font-weight:700;color:var(--pri);line-height:1}
-.stat-lbl{font-size:.78rem;color:var(--txt3);margin-top:6px}
 .field{margin-bottom:18px}
 .field-row{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-bottom:18px}
 label{display:block;font-size:.78rem;font-weight:600;color:var(--txt2);margin-bottom:5px;text-transform:uppercase;letter-spacing:.04em}
