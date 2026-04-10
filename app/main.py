@@ -1677,8 +1677,8 @@ _ADMIN_JS = """
         else if(t==='s'||t==='strike'||t==='del') out+='<s>'+inner+'</s>';
         else if(t==='code') out+='<code>'+inner+'</code>';
         else if(t==='a'){var href=(n.getAttribute('href')||'').replace(/"/g,'&quot;');out+='<a href="'+href+'">'+inner+'</a>';}
-        else if(t==='br') out+='\n';
-        else if(t==='div'||t==='p') out+=(inner||'')+'\n';
+        else if(t==='br') out+='\\n';
+        else if(t==='div'||t==='p') out+=(inner||'')+'\\n';
         else out+=inner;
       }
     });
@@ -1693,7 +1693,7 @@ _ADMIN_JS = """
     var tb=document.createElement('div'); tb.className='rte-toolbar'; wrap.appendChild(tb);
     var body=document.createElement('div'); body.className='rte-body'; body.contentEditable='true';
     body.setAttribute('data-ph',ta.getAttribute('placeholder')||'输入内容…');
-    var existing=ta.value; if(existing) body.innerHTML=existing.replace(/\n/g,'<br>');
+    var existing=ta.value; if(existing) body.innerHTML=existing.replace(/\\n/g,'<br>');
     wrap.appendChild(body); self._body=body;
     var tools=[
       {cmd:'bold',html:'<b>B</b>',title:'粗体'},
@@ -1732,7 +1732,7 @@ _ADMIN_JS = """
       });
       tb.appendChild(btn);
     });
-    self.sync=function(){var raw=serializeRTENode(body);self._ta.value=raw.replace(/\n+$/,'');};
+    self.sync=function(){var raw=serializeRTENode(body);self._ta.value=raw.replace(/\\n+$/,'');};
     self.refreshPills=function(){
       if(!self._pd||!self._getPills)return;
       var pills=self._getPills(); self._pd.innerHTML='';
