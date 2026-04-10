@@ -603,11 +603,7 @@ async def approve_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not context.args:
         await update.message.reply_text("用法：/approve 报告ID")
         return
-    try:
-        report_id = int(context.args[0])
-    except ValueError:
-        await update.message.reply_text("报告ID必须是数字。")
-        return
+    report_id = context.args[0]
     with db_connection() as conn:
         report = conn.execute("SELECT * FROM reports WHERE id = %s", (report_id,)).fetchone()
         if not report:
@@ -631,11 +627,7 @@ async def reject_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not context.args:
         await update.message.reply_text("用法：/reject 报告ID 原因")
         return
-    try:
-        report_id = int(context.args[0])
-    except ValueError:
-        await update.message.reply_text("报告ID必须是数字。")
-        return
+    report_id = context.args[0]
     reason = " ".join(context.args[1:]).strip() or "请联系管理员"
     with db_connection() as conn:
         report = conn.execute("SELECT * FROM reports WHERE id = %s", (report_id,)).fetchone()
@@ -780,11 +772,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if not is_user_admin(update.effective_user.id):
             await query.answer("无权限。", show_alert=True)
             return
-        try:
-            report_id = int(data.split(":", 1)[1])
-        except ValueError:
-            await query.answer("无效的报告ID。", show_alert=True)
-            return
+        report_id = data.split(":", 1)[1]
         with db_connection() as conn:
             report = conn.execute("SELECT * FROM reports WHERE id = %s", (report_id,)).fetchone()
             if not report:
@@ -814,11 +802,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if not is_user_admin(update.effective_user.id):
             await query.answer("无权限。", show_alert=True)
             return
-        try:
-            report_id = int(data.split(":", 1)[1])
-        except ValueError:
-            await query.answer("无效的报告ID。", show_alert=True)
-            return
+        report_id = data.split(":", 1)[1]
         with db_connection() as conn:
             report = conn.execute("SELECT * FROM reports WHERE id = %s", (report_id,)).fetchone()
         if not report:
