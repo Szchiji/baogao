@@ -51,7 +51,7 @@ from app.keyboards import (
     start_inline_buttons,
     start_keyboard,
 )
-from app.utils import safe_format, utc_now_iso
+from app.utils import parse_json, safe_format, utc_now_iso
 
 logger = logging.getLogger("report-bot")
 
