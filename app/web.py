@@ -174,17 +174,44 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
     async def admin_login():
         if not config.admin_panel_token:
             raise HTTPException(status_code=400, detail="admin token not set")
-        return HTMLResponse(
-            """
-            <html><body style="font-family:sans-serif;max-width:480px;margin:40px auto;">
-              <h3>管理员登录</h3>
-              <form method="get" action="/admin">
-                <input type="password" name="token" placeholder="ADMIN_PANEL_TOKEN" style="width:100%"><br><br>
-                <button type="submit">登录</button>
-              </form>
-            </body></html>
-            """
-        )
+        return HTMLResponse("""<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>管理员登录</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f9fafb;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px}
+.card{background:#fff;border-radius:16px;box-shadow:0 4px 24px rgba(0,0,0,.1);padding:40px 36px;width:100%;max-width:420px}
+.logo{text-align:center;margin-bottom:28px}
+.logo h1{font-size:1.3rem;font-weight:700;color:#111827;margin-top:10px}
+.logo p{font-size:.85rem;color:#6b7280;margin-top:4px}
+label{display:block;font-size:.78rem;font-weight:600;color:#6b7280;text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px}
+input[type=password]{width:100%;padding:10px 13px;border:1.5px solid #e5e7eb;border-radius:8px;font-size:.9rem;font-family:inherit;transition:border-color .15s,box-shadow .15s}
+input[type=password]:focus{outline:none;border-color:#4f46e5;box-shadow:0 0 0 3px rgba(79,70,229,.12)}
+.field{margin-bottom:20px}
+.btn{display:block;width:100%;padding:11px;background:#4f46e5;color:#fff;border:none;border-radius:8px;font-size:.9rem;font-weight:600;font-family:inherit;cursor:pointer;transition:background .15s;text-align:center}
+.btn:hover{background:#4338ca}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo">
+    <div style="font-size:2.5rem">📋</div>
+    <h1>报告机器人管理后台</h1>
+    <p>请输入管理员密码以继续</p>
+  </div>
+  <form method="get" action="/admin">
+    <div class="field">
+      <label>管理员密码</label>
+      <input type="password" name="token" placeholder="ADMIN_PANEL_TOKEN" autofocus>
+    </div>
+    <button type="submit" class="btn">🔐 登录</button>
+  </form>
+</div>
+</body>
+</html>""")
 
     @web.get("/admin/logout")
     async def admin_logout():
