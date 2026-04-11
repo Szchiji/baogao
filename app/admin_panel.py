@@ -340,11 +340,12 @@ _ADMIN_JS = """
     rm.type='button'; rm.textContent='✕'; rm.className='btn btn-danger btn-sm';
     rm.addEventListener('click',function(){card.remove();});
     row1.appendChild(keyIn); row1.appendChild(labelIn); row1.appendChild(typeSel); row1.appendChild(reqLabel); row1.appendChild(rm);
-    // Row 2: hint input
+    // Row 2: hint textarea
     var row2=document.createElement('div'); row2.style.cssText='padding:0 12px 10px;';
-    var hintIn=document.createElement('input');
-    hintIn.type='text'; hintIn.placeholder='字段说明（选填）：例如"请填写今日工作摘要"，显示给用户作为填写提示';
-    hintIn.value=field.hint||''; hintIn.dataset.field='hint'; hintIn.style.width='100%';
+    var hintIn=document.createElement('textarea');
+    hintIn.placeholder='字段说明（选填）：例如"请填写今日工作摘要"，显示给用户作为填写提示，支持多行';
+    hintIn.value=field.hint||''; hintIn.dataset.field='hint'; hintIn.style.cssText='width:100%;rows:2;resize:vertical;min-height:52px;';
+    hintIn.rows=2;
     row2.appendChild(hintIn);
     card.appendChild(row1); card.appendChild(row2);
     return card;
