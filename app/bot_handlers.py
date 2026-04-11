@@ -93,14 +93,6 @@ def _is_bot_admin(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
     return user_id in _get_bot_admin_ids(context)
 
 
-def _is_child_bot(context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Return True when this Application instance is a child bot (not the main bot).
-
-    Child bots have ``bot_data["child_admin_id"]`` set at startup.
-    """
-    return context.bot_data.get("child_admin_id") is not None
-
-
 async def _delete_after(bot: Bot, chat_id: int, message_id: int, delay: int) -> None:
     """Delete a message after *delay* seconds. Errors are silently ignored."""
     await asyncio.sleep(delay)
@@ -224,14 +216,18 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_bot_admin(context, update.effective_user.id):
         await update.message.reply_text("无权限。")
         return
-    base_url = (context.bot_data.get("admin_panel_url") or setting_get("admin_panel_url")).strip()
+    bot_id = _get_bot_id(context)
+    base_url = (
+        context.bot_data.get("admin_panel_url")
+        or setting_get("admin_panel_url", bot_id=bot_id)
+        or os.getenv("ADMIN_PANEL_URL", "")
+    ).strip()
     if not base_url:
         await update.message.reply_text("未配置 ADMIN_PANEL_URL。")
         return
     _cleanup_verify_state()
     otp = secrets.token_urlsafe(16)
     child_admin_id = context.bot_data.get("child_admin_id")
-    bot_id = _get_bot_id(context)
     _otp_tokens[otp] = {
         "expiry": time.time() + _OTP_TOKEN_TTL,
         "owner_user_id": int(child_admin_id) if child_admin_id is not None else None,
