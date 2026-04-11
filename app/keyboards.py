@@ -12,7 +12,6 @@ from telegram import (
     ReplyKeyboardMarkup,
 )
 
-from app.config import is_user_admin
 from app.crud import setting_get
 from app.utils import parse_json
 
@@ -188,7 +187,6 @@ def _normalize_admin_url(base_url: str) -> str:
 
 def start_inline_buttons(user_id: int | None = None, admin_panel_url: str | None = None, bot_id: str = "") -> InlineKeyboardMarkup | None:
     raw_buttons = parse_json(setting_get("start_buttons_json", bot_id=bot_id), [])
-    is_admin = user_id is not None and is_user_admin(user_id)
     if admin_panel_url is None:
         admin_panel_url = os.getenv("ADMIN_PANEL_URL", "").strip()
     buttons: list[list[InlineKeyboardButton]] = []

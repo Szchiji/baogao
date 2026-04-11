@@ -391,6 +391,7 @@ input[type=password]:focus{outline:none;border-color:rgba(99,102,241,.55);box-sh
         usage_text: str = Form(""),
         search_help_text: str = Form(""),
         report_link_base: str = Form(""),
+        return_tab: str = Form("", alias="_return_tab"),
     ):
         if redirect := _auth(request):
             return redirect
@@ -438,7 +439,15 @@ input[type=password]:focus{outline:none;border-color:rgba(99,102,241,.55);box-sh
         }
         for key, value in updates.items():
             setting_set(key, value, bot_id=bot_id)
-        return RedirectResponse(url="/admin?saved=1", status_code=303)
+        # Redirect back to the settings sub-tab the user was editing.
+        # Use a dict mapping so the redirect URL always contains a hardcoded literal value,
+        # never the raw user-supplied field, preventing open-redirect risk.
+        _safe_tabs = {
+            "basic": "basic", "welcome": "welcome", "keyboard": "keyboard",
+            "template": "template", "texts": "texts", "review": "review",
+        }
+        redirect_tab = _safe_tabs.get(return_tab.strip(), "basic")
+        return RedirectResponse(url="/admin?saved=1&tab=" + redirect_tab, status_code=303)
 
     @web.get("/admin/settings")
     async def admin_settings(request: Request):

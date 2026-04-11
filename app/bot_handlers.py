@@ -93,14 +93,6 @@ def _is_bot_admin(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
     return user_id in _get_bot_admin_ids(context)
 
 
-def _is_child_bot(context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Return True when this Application instance is a child bot (not the main bot).
-
-    Child bots have ``bot_data["child_admin_id"]`` set at startup.
-    """
-    return context.bot_data.get("child_admin_id") is not None
-
-
 async def _delete_after(bot: Bot, chat_id: int, message_id: int, delay: int) -> None:
     """Delete a message after *delay* seconds. Errors are silently ignored."""
     await asyncio.sleep(delay)
@@ -224,14 +216,18 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_bot_admin(context, update.effective_user.id):
         await update.message.reply_text("无权限。")
         return
-    base_url = (context.bot_data.get("admin_panel_url") or setting_get("admin_panel_url")).strip()
+    bot_id = _get_bot_id(context)
+    base_url = (
+        context.bot_data.get("admin_panel_url")
+        or setting_get("admin_panel_url", bot_id=bot_id)
+        or os.getenv("ADMIN_PANEL_URL", "")
+    ).strip()
     if not base_url:
         await update.message.reply_text("未配置 ADMIN_PANEL_URL。")
         return
     _cleanup_verify_state()
     otp = secrets.token_urlsafe(16)
     child_admin_id = context.bot_data.get("child_admin_id")
-    bot_id = _get_bot_id(context)
     _otp_tokens[otp] = {
         "expiry": time.time() + _OTP_TOKEN_TTL,
         "owner_user_id": int(child_admin_id) if child_admin_id is not None else None,
@@ -239,8 +235,10 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     }
     login_url = f"{base_url.rstrip('/')}/admin/otp?token={otp}"
     await update.message.reply_text(
-        f"🔐 您的后台登录链接（{_OTP_TOKEN_TTL // 60} 分钟内有效）：\n{login_url}",
-        disable_web_page_preview=True,
+        f"🔐 点击下方按钮登录管理后台（链接 {_OTP_TOKEN_TTL // 60} 分钟内有效）",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("🚀 打开管理后台", url=login_url)]]
+        ),
     )
 
 
@@ -532,7 +530,11 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     "bot_id": bot_id,
                 }
                 _verify_code_otps[text] = otp
-                base_url = (context.bot_data.get("admin_panel_url") or setting_get("admin_panel_url")).strip()
+                base_url = (
+                    context.bot_data.get("admin_panel_url")
+                    or setting_get("admin_panel_url", bot_id=bot_id)
+                    or os.getenv("ADMIN_PANEL_URL", "")
+                ).strip()
                 if base_url:
                     await update.message.reply_text(f"✅ 身份验证成功！后台页面将自动跳转，请在 {_OTP_TOKEN_TTL // 60} 分钟内返回浏览器。")
                 else:

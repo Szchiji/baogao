@@ -7,9 +7,9 @@ from app.keyboards import report_template
 from app.utils import parse_json
 
 # Tabs that are only shown to the main admin; child-bot sub-admins cannot see these.
-_MAIN_ADMIN_ONLY_TABS = frozenset(
-    {"basic", "welcome", "keyboard", "template", "texts", "review", "broadcast", "child-bots"}
-)
+# Settings tabs (basic, welcome, keyboard, template, texts, review) are intentionally
+# NOT in this set so that child admins can configure their own bot's settings.
+_MAIN_ADMIN_ONLY_TABS = frozenset({"broadcast", "child-bots"})
 
 def report_to_html(report_row: dict) -> str:
     data = parse_json(report_row["data_json"], {})
@@ -297,6 +297,7 @@ _ADMIN_JS = """
   });
   var noSaveTabs=['pending','blacklist','broadcast','reports','child-bots'];
 
+  var returnTabInput=document.getElementById('settings-return-tab');
   function switchTab(tab){
     tabPanes.forEach(function(p){p.classList.remove('active');});
     var pane=document.getElementById('pane-'+tab);
@@ -305,6 +306,8 @@ _ADMIN_JS = """
     if(saveBar)saveBar.style.display=noSaveTabs.indexOf(tab)>=0?'none':'flex';
     var sec=tabSection[tab]||currentSection;
     sectionLastTab[sec]=tab;
+    // Keep the hidden return-tab field in sync so the server redirects back here after save
+    if(returnTabInput&&noSaveTabs.indexOf(tab)<0)returnTabInput.value=tab;
     if(tab==='review'&&_rteMap['push_template'])_rteMap['push_template'].refreshPills();
     if(tab==='broadcast'&&_rteMap['broadcast_text'])_rteMap['broadcast_text'].refreshPills();
   }
@@ -882,16 +885,18 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
 
     saved_banner = "<div class='alert alert-success'>✅ 配置已保存成功！</div>" if saved else ""
 
-    # For child-admin sessions show a notice and restrict the UI to report/blacklist tabs only.
+    # For child-admin sessions show a notice explaining what they can and cannot do.
     child_admin_banner = (
         "<div class='alert' style='background:rgba(245,158,11,.1);color:#fde68a;border:1px solid rgba(245,158,11,.25);border-left:4px solid #f59e0b'>"
-        "⚠️ 您以子管理员身份登录，仅可查看和审核报告及黑名单，无权修改系统设置。"
+        "⚠️ 您以子管理员身份登录，可查看/审核报告、管理黑名单并配置本机器人设置；无法管理子机器人或执行广播。"
         "</div>"
         if is_child_admin else ""
     )
 
-    # Nav items that child admins are not allowed to see
-    _hidden_if_child = "style='display:none'" if is_child_admin else ""
+    # Nav items that are restricted to the main admin only (child-bot management & broadcast).
+    # Settings tabs (basic, welcome, keyboard, template, texts, review) are accessible to
+    # child admins so they can configure their own bot's settings (scoped by bot_id).
+    _hidden_if_child_mgmt = "style='display:none'" if is_child_admin else ""
     # Override initial_tab to a visible tab for child admins
     if is_child_admin and initial_tab in _MAIN_ADMIN_ONLY_TABS:
         initial_tab = "pending"
@@ -952,19 +957,19 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
 
   <!-- ── Sub-nav: Settings ───────────────────────────── -->
   <div class="sub-nav" id="sub-nav-settings" role="tablist" aria-label="设置子导航">
-    <button class="sub-btn active" data-tab="basic" role="tab" {_hidden_if_child}>⚙️ 基本</button>
-    <button class="sub-btn" data-tab="welcome" role="tab" {_hidden_if_child}>👋 欢迎</button>
-    <button class="sub-btn" data-tab="keyboard" role="tab" {_hidden_if_child}>⌨️ 菜单</button>
-    <button class="sub-btn" data-tab="template" role="tab" {_hidden_if_child}>📝 模板</button>
-    <button class="sub-btn" data-tab="texts" role="tab" {_hidden_if_child}>💬 文本</button>
-    <button class="sub-btn" data-tab="review" role="tab" {_hidden_if_child}>🔍 审核</button>
-    <button class="sub-btn" data-tab="child-bots" role="tab" {_hidden_if_child}>🤖 子机器人</button>
+    <button class="sub-btn active" data-tab="basic" role="tab">⚙️ 基本</button>
+    <button class="sub-btn" data-tab="welcome" role="tab">👋 欢迎</button>
+    <button class="sub-btn" data-tab="keyboard" role="tab">⌨️ 菜单</button>
+    <button class="sub-btn" data-tab="template" role="tab">📝 模板</button>
+    <button class="sub-btn" data-tab="texts" role="tab">💬 文本</button>
+    <button class="sub-btn" data-tab="review" role="tab">🔍 审核</button>
+    <button class="sub-btn" data-tab="child-bots" role="tab" {_hidden_if_child_mgmt}>🤖 子机器人</button>
   </div>
 
   <!-- ── Sub-nav: Users ─────────────────────────────── -->
   <div class="sub-nav" id="sub-nav-users" role="tablist" aria-label="用户管理子导航">
     <button class="sub-btn active" data-tab="blacklist" role="tab">🚫 黑名单</button>
-    <button class="sub-btn" data-tab="broadcast" role="tab" {_hidden_if_child}>📢 广播</button>
+    <button class="sub-btn" data-tab="broadcast" role="tab" {_hidden_if_child_mgmt}>📢 广播</button>
   </div>
 
   <!-- ── Content ────────────────────────────────────── -->
@@ -973,6 +978,7 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
     {saved_banner}
 
     <form id="settings-form" method="post" action="/admin/save">
+    <input type="hidden" name="_return_tab" id="settings-return-tab" value="basic">
 
     <div id="pane-basic" class="tab-pane{_active_if('basic')}">
       <p class="section-title">基本设置</p>
@@ -1279,7 +1285,7 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
     <span class="tab-icon" aria-hidden="true">📊</span>
     <span class="tab-label">统计</span>
   </button>
-  <button type="button" class="tab-btn" data-section="settings" role="tab" aria-selected="false" aria-label="系统设置" {_hidden_if_child}>
+  <button type="button" class="tab-btn" data-section="settings" role="tab" aria-selected="false" aria-label="系统设置">
     <span class="tab-icon" aria-hidden="true">⚙️</span>
     <span class="tab-label">设置</span>
   </button>
