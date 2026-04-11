@@ -327,6 +327,9 @@ input[type=password]:focus{outline:none;border-color:#4f46e5;box-shadow:0 0 0 3p
         usage_text: str = Form(""),
         search_help_text: str = Form(""),
         report_link_base: str = Form(""),
+        clone_mode_enabled: str = Form(""),
+        clone_botfather_link: str = Form(""),
+        clone_text: str = Form(""),
     ):
         if redirect := _auth(request):
             return redirect
@@ -374,6 +377,9 @@ input[type=password]:focus{outline:none;border-color:#4f46e5;box-shadow:0 0 0 3p
             "usage_text": usage_text,
             "search_help_text": search_help_text,
             "report_link_base": report_link_base.strip(),
+            "clone_mode_enabled": "1" if clone_mode_enabled.strip() == "1" else "0",
+            "clone_botfather_link": clone_botfather_link.strip(),
+            "clone_text": clone_text,
         }
         for key, value in updates.items():
             setting_set(key, value)

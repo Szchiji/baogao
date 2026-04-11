@@ -514,6 +514,18 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(setting_get("contact_text"))
     elif action == "usage":
         await update.message.reply_text(setting_get("usage_text"))
+    elif action == "clone":
+        if setting_get("clone_mode_enabled", "0") != "1":
+            await update.message.reply_text("一键克隆功能暂未开启。")
+            return
+        clone_link = setting_get("clone_botfather_link", "").strip()
+        clone_text = setting_get("clone_text", DEFAULT_SETTINGS["clone_text"])
+        markup = None
+        if clone_link:
+            markup = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🤖 一键克隆机器人", url=clone_link)]]
+            )
+        await update.message.reply_text(clone_text, reply_markup=markup)
     else:
         await update.message.reply_text(item.get("value") or "已收到。")
 

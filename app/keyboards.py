@@ -201,6 +201,12 @@ def start_inline_buttons(user_id: int | None = None) -> InlineKeyboardMarkup | N
                 # All users see the verify page; only admins can complete verification
                 url = _admin_verify_url(admin_panel_url)
             buttons.append([InlineKeyboardButton(text, url=url)])
+    # Append clone button when clone mode is enabled and a BotFather link is configured
+    if setting_get("clone_mode_enabled", "0") == "1":
+        clone_link = setting_get("clone_botfather_link", "").strip()
+        if clone_link:
+            buttons.append([InlineKeyboardButton("🤖 一键克隆机器人", url=clone_link)])
+
     return InlineKeyboardMarkup(buttons) if buttons else None
 
 

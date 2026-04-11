@@ -254,6 +254,7 @@ _ADMIN_JS = """
     {value:'my_reports',label:'我的报告（内置）'},
     {value:'contact',label:'联系管理员（内置）'},
     {value:'usage',label:'操作方式（内置）'},
+    {value:'clone',label:'克隆机器人（内置）'},
     {value:'text',label:'自定义回复文本'}
   ];
   function makeKbRow(item){
@@ -784,6 +785,7 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
     <button type="button" class="nav-item" data-tab="reports"><span class="nav-icon">📂</span><span class="nav-label">报告历史</span></button>
     <button type="button" class="nav-item" data-tab="blacklist"><span class="nav-icon">🚫</span><span class="nav-label">黑名单</span></button>
     <button type="button" class="nav-item" data-tab="broadcast"><span class="nav-icon">📢</span><span class="nav-label">广播发送</span></button>
+    <button type="button" class="nav-item" data-tab="clone"><span class="nav-icon">🤖</span><span class="nav-label">克隆相关设置</span></button>
   </nav>
   <div class="sidebar-footer">
     <a href="/admin/logout">🚪 退出登录</a>
@@ -1056,6 +1058,35 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
             <button type="submit" class="btn btn-primary">📢 发送广播</button>
           </div>
         </form>
+      </div>
+    </div>
+
+    <div id="pane-clone" class="tab-pane">
+      <p class="section-title">克隆相关设置</p>
+      <div class="card">
+        <div style="margin-bottom:20px;padding:14px 16px;background:#eff6ff;border-radius:8px;border:1px solid #bfdbfe;font-size:.85rem;color:#1d4ed8;line-height:1.8">
+          <b>🔧 开启一键克隆功能需完成两步：</b><br>
+          1️⃣ 在本页开启「一键克隆模式」并填入 BotFather 克隆链接<br>
+          2️⃣ 在 @BotFather：打开按钮 → 选择机器人 → Bot Settings → 开启 Bot Management Mode
+        </div>
+        <div class="field">
+          <label>一键克隆模式</label>
+          <label style="display:flex;align-items:center;gap:8px;font-weight:normal;font-size:.88rem;cursor:pointer;text-transform:none;letter-spacing:0;color:#374151">
+            <input type="checkbox" name="clone_mode_enabled" value="1"{'checked' if settings_map.get('clone_mode_enabled','0') == '1' else ''}>
+            开启后，在 /start 欢迎消息及键盘「克隆机器人」按钮中展示克隆入口
+          </label>
+          <div class="hint" style="margin-top:4px">同时需要在 @BotFather 开启 Bot Management Mode，两步都完成功能才会生效。</div>
+        </div>
+        <div class="field">
+          <label>BotFather 克隆链接</label>
+          <input type="text" name="clone_botfather_link" value="{e('clone_botfather_link')}" placeholder="https://t.me/BotFather?start=...">
+          <div class="hint">在 @BotFather 开启 Bot Management Mode 后，BotFather 会提供专属克隆链接，粘贴至此。</div>
+        </div>
+        <div class="field">
+          <label>克隆按钮说明文字</label>
+          <textarea name="clone_text" rows="3">{e('clone_text')}</textarea>
+          <div class="hint">用户点击「克隆机器人」键盘按钮时收到的说明文字（/start 内联按钮无需额外文字）。</div>
+        </div>
       </div>
     </div>
 

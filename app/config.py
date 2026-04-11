@@ -46,6 +46,9 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "push_photos_enabled": "1",
     "pending_reminder_threshold_hours": "24",
     "pending_reminder_interval_hours": "2",
+    "clone_mode_enabled": "0",
+    "clone_botfather_link": "",
+    "clone_text": "🤖 点击下方按钮即可一键克隆此机器人，无需手动操作 BotFather！",
 }
 
 
