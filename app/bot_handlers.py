@@ -66,7 +66,15 @@ logger = logging.getLogger("report-bot")
 _AUTO_DELETE_DELAY = 86400  # 24 hours in seconds
 
 
-def _get_bot_admin_ids(context: ContextTypes.DEFAULT_TYPE) -> list[int]:
+def _get_bot_id(context: ContextTypes.DEFAULT_TYPE) -> str:
+    """Return the bot_id for the current bot instance.
+
+    The main bot uses '' (empty string); child bots use str(child_bot_db_id).
+    """
+    return context.bot_data.get("bot_id", "")
+
+
+
     """Return the effective admin user IDs for the current bot instance.
 
     For child bots the ``bot_data["child_admin_id"]`` is the sole admin (the
@@ -154,19 +162,20 @@ async def _build_force_sub_prompt(bot: Bot, channels: list[str]) -> tuple[str, I
 
 
 async def send_start_content(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = setting_get("start_text", DEFAULT_SETTINGS["start_text"])
-    media_type = setting_get("start_media_type", "").strip().lower()
-    media_url = setting_get("start_media_url", "").strip()
+    bot_id = _get_bot_id(context)
+    text = setting_get("start_text", DEFAULT_SETTINGS["start_text"], bot_id=bot_id)
+    media_type = setting_get("start_media_type", "", bot_id=bot_id).strip().lower()
+    media_url = setting_get("start_media_url", "", bot_id=bot_id).strip()
     user_id = update.effective_user.id if update.effective_user else None
     # Use the per-bot admin_panel_url from bot_data (set for child bots), falling
     # back to the DB setting, then the global env var.
     bot_admin_url = (
         context.bot_data.get("admin_panel_url")
-        or setting_get("admin_panel_url")
+        or setting_get("admin_panel_url", bot_id=bot_id)
         or os.getenv("ADMIN_PANEL_URL", "")
     ).strip() or None
-    inline_markup = start_inline_buttons(user_id=user_id, admin_panel_url=bot_admin_url)
-    keyboard = start_keyboard()
+    inline_markup = start_inline_buttons(user_id=user_id, admin_panel_url=bot_admin_url, bot_id=bot_id)
+    keyboard = start_keyboard(bot_id=bot_id)
     if media_type == "photo" and media_url:
         await update.effective_chat.send_photo(
             photo=media_url,
@@ -196,12 +205,13 @@ async def send_start_content(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    upsert_user(user_id, update.effective_user.username)
-    if is_user_banned(user_id):
+    bot_id = _get_bot_id(context)
+    upsert_user(user_id, update.effective_user.username, bot_id=bot_id)
+    if is_user_banned(user_id, bot_id=bot_id):
         await update.effective_chat.send_message("您已被限制使用此机器人。")
         return
-    channels = get_force_sub_channels()
-    if channels and not await is_subscribed(context.bot, user_id):
+    channels = get_force_sub_channels(bot_id=bot_id)
+    if channels and not await is_subscribed(context.bot, user_id, bot_id=bot_id):
         text, markup = await _build_force_sub_prompt(context.bot, channels)
         sent = await update.effective_chat.send_message(text, reply_markup=markup)
         schedule_auto_delete(context.bot, sent.chat_id, sent.message_id)
@@ -220,9 +230,11 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _cleanup_verify_state()
     otp = secrets.token_urlsafe(16)
     child_admin_id = context.bot_data.get("child_admin_id")
+    bot_id = _get_bot_id(context)
     _otp_tokens[otp] = {
         "expiry": time.time() + _OTP_TOKEN_TTL,
         "owner_user_id": int(child_admin_id) if child_admin_id is not None else None,
+        "bot_id": bot_id,
     }
     login_url = f"{base_url.rstrip('/')}/admin/otp?token={otp}"
     await update.message.reply_text(
@@ -232,7 +244,7 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def start_report_draft(context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
-    template = report_template()
+    template = report_template(bot_id=_get_bot_id(context))
     draft = {"template": template, "values": {}, "awaiting": ""}
     context.user_data["report_draft"] = draft
     return draft
@@ -278,10 +290,10 @@ async def _do_query_page(
                 """
                 SELECT id, username, tag, created_at, channel_message_link
                 FROM reports
-                WHERE status = 'approved' AND username ILIKE %s
+                WHERE bot_id = %s AND status = 'approved' AND username ILIKE %s
                 ORDER BY id DESC LIMIT %s OFFSET %s
                 """,
-                (query_value, limit + 1, offset),
+                (_get_bot_id(context), query_value, limit + 1, offset),
             ).fetchall()
     else:
         with db_connection() as conn:
@@ -289,10 +301,10 @@ async def _do_query_page(
                 """
                 SELECT id, username, tag, created_at, channel_message_link
                 FROM reports
-                WHERE status = 'approved' AND tag ILIKE %s
+                WHERE bot_id = %s AND status = 'approved' AND tag ILIKE %s
                 ORDER BY id DESC LIMIT %s OFFSET %s
                 """,
-                (query_value, limit + 1, offset),
+                (_get_bot_id(context), query_value, limit + 1, offset),
             ).fetchall()
 
     has_more = len(rows) > limit
@@ -301,7 +313,7 @@ async def _do_query_page(
     if not rows:
         text = "未找到匹配报告。" if page == 0 else "没有更多结果了。"
     else:
-        link_base = setting_get("report_link_base", "").strip()
+        link_base = setting_get("report_link_base", "", bot_id=_get_bot_id(context)).strip()
         header = f"查询结果（第 {page + 1} 页）：" if page > 0 else "查询结果："
         lines = [header]
         for row in rows:
@@ -333,9 +345,9 @@ async def _do_query_page(
         await update.message.reply_text(text, reply_markup=markup)
 
 
-async def query_reports(text: str) -> str:
+async def query_reports(text: str, bot_id: str = "") -> str:
     """Legacy single-page query; kept for plain-text fallback."""
-    return setting_get("search_help_text", DEFAULT_SETTINGS["search_help_text"])
+    return setting_get("search_help_text", DEFAULT_SETTINGS["search_help_text"], bot_id=bot_id)
 
 
 _MY_REPORTS_PAGE_SIZE = 5
@@ -350,7 +362,8 @@ async def my_reports_flow(
 ) -> None:
     """Show the calling user's own submitted reports with pagination."""
     user_id = update.effective_user.id
-    reports = get_user_reports(user_id, offset=page * _MY_REPORTS_PAGE_SIZE, limit=_MY_REPORTS_PAGE_SIZE)
+    bot_id = _get_bot_id(context)
+    reports = get_user_reports(user_id, offset=page * _MY_REPORTS_PAGE_SIZE, limit=_MY_REPORTS_PAGE_SIZE, bot_id=bot_id)
     has_more = len(reports) > _MY_REPORTS_PAGE_SIZE
     reports = reports[:_MY_REPORTS_PAGE_SIZE]
 
@@ -408,14 +421,15 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = message_text.strip()
 
     user = update.effective_user
-    upsert_user(user.id, user.username)
+    bot_id = _get_bot_id(context)
+    upsert_user(user.id, user.username, bot_id=bot_id)
 
-    if is_user_banned(user.id):
+    if is_user_banned(user.id, bot_id=bot_id):
         await update.message.reply_text("您已被限制使用此机器人。")
         return
 
-    channels = get_force_sub_channels()
-    if channels and not await is_subscribed(context.bot, update.effective_user.id):
+    channels = get_force_sub_channels(bot_id=bot_id)
+    if channels and not await is_subscribed(context.bot, update.effective_user.id, bot_id=bot_id):
         sub_text, markup = await _build_force_sub_prompt(context.bot, channels)
         sent = await update.message.reply_text(sub_text, reply_markup=markup)
         schedule_auto_delete(context.bot, sent.chat_id, sent.message_id)
@@ -432,7 +446,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         context.user_data.pop("pending_reject_id", None)
         reason = text
         with db_connection() as conn:
-            report = conn.execute("SELECT * FROM reports WHERE id = %s", (pending_reject_id,)).fetchone()
+            report = conn.execute("SELECT * FROM reports WHERE id = %s AND bot_id = %s", (pending_reject_id, bot_id)).fetchone()
             if not report:
                 await update.message.reply_text("报告不存在。")
                 return
@@ -440,12 +454,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 await update.message.reply_text(f"报告已处于 {report['status']} 状态，无法驳回。")
                 return
             conn.execute(
-                "UPDATE reports SET status='rejected', review_feedback=%s, reviewed_at=%s WHERE id = %s",
-                (reason, utc_now_iso(), pending_reject_id),
+                "UPDATE reports SET status='rejected', review_feedback=%s, reviewed_at=%s WHERE id = %s AND bot_id = %s",
+                (reason, utc_now_iso(), pending_reject_id, bot_id),
             )
         log_audit(update.effective_user.id, "reject", int(pending_reject_id), note=reason)
         tpl = (
-            setting_get("review_rejected_template", "").strip()
+            setting_get("review_rejected_template", "", bot_id=bot_id).strip()
             or DEFAULT_SETTINGS["review_rejected_template"]
         )
         feedback = safe_format(tpl, id=pending_reject_id, reason=reason)
@@ -514,6 +528,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 _otp_tokens[otp] = {
                     "expiry": time.time() + _OTP_TOKEN_TTL,
                     "owner_user_id": int(child_admin_id) if child_admin_id is not None else None,
+                    "bot_id": bot_id,
                 }
                 _verify_code_otps[text] = otp
                 base_url = (context.bot_data.get("admin_panel_url") or setting_get("admin_panel_url")).strip()
@@ -533,7 +548,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _do_query_page(update, context, "h", text, 0)
         return
 
-    mapping = {item["text"]: item for item in keyboard_config()}
+    mapping = {item["text"]: item for item in keyboard_config(bot_id=bot_id)}
     item = mapping.get(text)
     if not item:
         logger.info(
@@ -549,13 +564,13 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if action == "write_report":
         await write_report_flow(update, context)
     elif action == "search_help":
-        await update.message.reply_text(setting_get("search_help_text"))
+        await update.message.reply_text(setting_get("search_help_text", bot_id=bot_id))
     elif action == "my_reports":
         await my_reports_flow(update, context, page=0)
     elif action == "contact":
-        await update.message.reply_text(setting_get("contact_text"))
+        await update.message.reply_text(setting_get("contact_text", bot_id=bot_id))
     elif action == "usage":
-        await update.message.reply_text(setting_get("usage_text"))
+        await update.message.reply_text(setting_get("usage_text", bot_id=bot_id))
     else:
         await update.message.reply_text(item.get("value") or "已收到。")
 
@@ -573,8 +588,9 @@ async def submit_report(context: ContextTypes.DEFAULT_TYPE, update: Update) -> N
         await update.effective_chat.send_message(f"以下必填项尚未填写，请继续完善：{missing_labels}")
         return
 
+    bot_id = _get_bot_id(context)
     # Rate limiting: max 3 reports per hour
-    if is_rate_limited_submission(update.effective_user.id):
+    if is_rate_limited_submission(update.effective_user.id, bot_id=bot_id):
         await update.effective_chat.send_message(
             "⚠️ 您提交报告过于频繁，请稍后再试（每小时最多 3 条）。"
         )
@@ -588,11 +604,12 @@ async def submit_report(context: ContextTypes.DEFAULT_TYPE, update: Update) -> N
         with db_connection() as conn:
             cur = conn.execute(
                 """
-                INSERT INTO reports (user_id, username, tag, data_json, status, created_at)
-                VALUES (%s, %s, %s, %s, 'pending', %s)
+                INSERT INTO reports (bot_id, user_id, username, tag, data_json, status, created_at)
+                VALUES (%s, %s, %s, %s, %s, 'pending', %s)
                 RETURNING id
                 """,
                 (
+                    bot_id,
                     update.effective_user.id,
                     username,
                     tag,
@@ -616,7 +633,7 @@ async def submit_report(context: ContextTypes.DEFAULT_TYPE, update: Update) -> N
     if admin_ids:
         preview = render_report_preview(values, template)
         submitter_id = update.effective_user.id
-        link_base = setting_get("report_link_base", "").strip()
+        link_base = setting_get("report_link_base", "", bot_id=bot_id).strip()
         detail_link = ""
         if link_base:
             detail_link = f"\n🔗 <a href='{html.escape(link_base.rstrip('/'))}/reports/{report_id}'>查看报告详情</a>"
@@ -662,16 +679,16 @@ async def submit_report(context: ContextTypes.DEFAULT_TYPE, update: Update) -> N
                 )
 
 
-def _build_approval_feedback(report_id: int, channel_link: str = "") -> str:
+def _build_approval_feedback(report_id: int, channel_link: str = "", bot_id: str = "") -> str:
     approved_tpl = (
-        setting_get("review_approved_template", "").strip()
+        setting_get("review_approved_template", "", bot_id=bot_id).strip()
         or DEFAULT_SETTINGS["review_approved_template"]
     )
     # Prefer the real Telegram channel message link; fall back to report_link_base web URL
     if channel_link:
         link = channel_link
     else:
-        link_base = setting_get("report_link_base", "").strip()
+        link_base = setting_get("report_link_base", "", bot_id=bot_id).strip()
         link = f"{link_base.rstrip('/')}/reports/{report_id}" if link_base else ""
     return safe_format(approved_tpl, id=report_id, link=link)
 
@@ -695,16 +712,16 @@ def _build_channel_message_link(channel: str, message_id: int) -> str:
     return f"https://t.me/{channel}/{message_id}"
 
 
-async def _push_report_to_channel(bot: Bot, report_id: int, report: dict) -> str:
+async def _push_report_to_channel(bot: Bot, report_id: int, report: dict, bot_id: str = "") -> str:
     """Push *report* to all configured push channels.  Returns the first channel message link (or '')."""
-    push_channels = get_push_channels()
+    push_channels = get_push_channels(bot_id=bot_id)
     if not push_channels:
         return ""
     data_values = parse_json(report["data_json"], {})
-    link_base = setting_get("report_link_base", "").strip()
+    link_base = setting_get("report_link_base", "", bot_id=bot_id).strip()
     link = f"{link_base.rstrip('/')}/reports/{report_id}" if link_base else ""
     # Build per-field placeholders (field key → value, excluding photo fields)
-    tpl_fields = report_template()["fields"]
+    tpl_fields = report_template(bot_id=bot_id)["fields"]
     field_labels = {f["key"]: f["label"] for f in tpl_fields}
     field_types = {f["key"]: f.get("type", "text") for f in tpl_fields}
     field_placeholders: dict[str, str] = {}
@@ -713,7 +730,7 @@ async def _push_report_to_channel(bot: Bot, report_id: int, report: dict) -> str
         if field_types.get(k, "text") != "photo":
             field_placeholders[k] = data_values.get(k, "")
     # Build {detail}: honour push_detail_fields_json ordering if configured
-    push_detail_keys = parse_json(setting_get("push_detail_fields_json", "[]"), [])
+    push_detail_keys = parse_json(setting_get("push_detail_fields_json", "[]", bot_id=bot_id), [])
     if isinstance(push_detail_keys, list) and push_detail_keys:
         detail_parts = []
         for k in push_detail_keys:
@@ -728,7 +745,7 @@ async def _push_report_to_channel(bot: Bot, report_id: int, report: dict) -> str
                 continue
             detail_parts.append(f"{field_labels.get(k, k)}: {data_values.get(k, '')}")
     detail = "\n".join(detail_parts)
-    push_tpl = setting_get("push_template", DEFAULT_SETTINGS["push_template"])
+    push_tpl = setting_get("push_template", DEFAULT_SETTINGS["push_template"], bot_id=bot_id)
     # Merge: built-in keys always win over field-specific ones
     format_kwargs: dict[str, Any] = dict(field_placeholders)
     format_kwargs.update({
@@ -751,7 +768,7 @@ async def _push_report_to_channel(bot: Bot, report_id: int, report: dict) -> str
                         (channel_link, report_id),
                     )
             # Send photo fields to the channel after the text push (if enabled)
-            if setting_get("push_photos_enabled", "1") == "1":
+            if setting_get("push_photos_enabled", "1", bot_id=bot_id) == "1":
                 for f in tpl_fields:
                     if field_types.get(f["key"], "text") == "photo":
                         photo_file_id = data_values.get(f["key"])
@@ -776,9 +793,11 @@ async def pending_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not _is_bot_admin(context, update.effective_user.id):
         await update.message.reply_text("无权限。")
         return
+    bot_id = _get_bot_id(context)
     with db_connection() as conn:
         rows = conn.execute(
-            "SELECT id, username, created_at FROM reports WHERE status = 'pending' ORDER BY id DESC LIMIT 20"
+            "SELECT id, username, created_at FROM reports WHERE bot_id = %s AND status = 'pending' ORDER BY id DESC LIMIT 20",
+            (bot_id,),
         ).fetchall()
     if not rows:
         await update.message.reply_text("没有待审核报告。")
@@ -798,9 +817,10 @@ async def approve_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text("用法：/approve 报告ID")
         return
     report_id = context.args[0]
+    bot_id = _get_bot_id(context)
     try:
         with db_connection() as conn:
-            report = conn.execute("SELECT * FROM reports WHERE id = %s", (report_id,)).fetchone()
+            report = conn.execute("SELECT * FROM reports WHERE id = %s AND bot_id = %s", (report_id, bot_id)).fetchone()
             if not report:
                 await update.message.reply_text("报告不存在。")
                 return
@@ -815,8 +835,8 @@ async def approve_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     log_audit(update.effective_user.id, "approve", int(report_id))
     await update.message.reply_text(f"报告 #{report_id} 已通过。")
 
-    channel_link = await _push_report_to_channel(context.bot, report_id, report)
-    feedback = _build_approval_feedback(report_id, channel_link=channel_link)
+    channel_link = await _push_report_to_channel(context.bot, report_id, report, bot_id=bot_id)
+    feedback = _build_approval_feedback(report_id, channel_link=channel_link, bot_id=bot_id)
     await context.bot.send_message(chat_id=report["user_id"], text=feedback)
 
 
@@ -836,9 +856,10 @@ async def reject_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     report_id = context.args[0]
     reason = " ".join(context.args[1:]).strip() or "请联系管理员"
+    bot_id = _get_bot_id(context)
     try:
         with db_connection() as conn:
-            report = conn.execute("SELECT * FROM reports WHERE id = %s", (report_id,)).fetchone()
+            report = conn.execute("SELECT * FROM reports WHERE id = %s AND bot_id = %s", (report_id, bot_id)).fetchone()
             if not report:
                 await update.message.reply_text("报告不存在。")
                 return
@@ -852,7 +873,7 @@ async def reject_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     log_audit(update.effective_user.id, "reject", int(report_id), note=reason)
     tpl = (
-        setting_get("review_rejected_template", "").strip()
+        setting_get("review_rejected_template", "", bot_id=bot_id).strip()
         or DEFAULT_SETTINGS["review_rejected_template"]
     )
     feedback = safe_format(tpl, id=report_id, reason=reason)
@@ -876,7 +897,7 @@ async def ban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("用户ID必须是数字。")
         return
     reason = " ".join(context.args[1:]).strip() or "管理员限制"
-    ban_user(target_id, None, reason)
+    ban_user(target_id, None, reason, bot_id=_get_bot_id(context))
     await update.message.reply_text(f"用户 {target_id} 已加入黑名单（原因：{reason}）。")
 
 
@@ -892,7 +913,7 @@ async def unban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except ValueError:
         await update.message.reply_text("用户ID必须是数字。")
         return
-    unban_user(target_id)
+    unban_user(target_id, bot_id=_get_bot_id(context))
     await update.message.reply_text(f"用户 {target_id} 已从黑名单移除。")
 
 
@@ -907,7 +928,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
     if data == "retry_sub":
         await query.answer()
-        if await is_subscribed(context.bot, update.effective_user.id):
+        if await is_subscribed(context.bot, update.effective_user.id, bot_id=_get_bot_id(context)):
             sent_ok = await query.message.reply_text("订阅检测通过。")
             schedule_auto_delete(context.bot, sent_ok.chat_id, sent_ok.message_id)
             await send_start_content(update, context)
@@ -946,10 +967,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await query.answer()
         report_id_str = data.split(":", 1)[1]
         user_id = update.effective_user.id
+        bot_id = _get_bot_id(context)
         with db_connection() as conn:
             report = conn.execute(
-                "SELECT * FROM reports WHERE id = %s AND user_id = %s AND status = 'rejected'",
-                (report_id_str, user_id),
+                "SELECT * FROM reports WHERE id = %s AND bot_id = %s AND user_id = %s AND status = 'rejected'",
+                (report_id_str, bot_id, user_id),
             ).fetchone()
         if not report:
             await query.message.reply_text("报告不存在或无权重新编辑。")
@@ -1063,10 +1085,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if data == "submit_report":
         await query.answer()
-        if is_user_banned(update.effective_user.id):
+        bot_id = _get_bot_id(context)
+        if is_user_banned(update.effective_user.id, bot_id=bot_id):
             await query.message.reply_text("您已被限制使用此机器人。")
             return
-        if get_force_sub_channels() and not await is_subscribed(context.bot, update.effective_user.id):
+        if get_force_sub_channels(bot_id=bot_id) and not await is_subscribed(context.bot, update.effective_user.id, bot_id=bot_id):
             await query.message.reply_text("请先订阅频道后再提交报告。")
             return
         await submit_report(context, update)
@@ -1077,9 +1100,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await query.answer("无权限。", show_alert=True)
             return
         report_id = data.split(":", 1)[1]
+        bot_id = _get_bot_id(context)
         try:
             with db_connection() as conn:
-                report = conn.execute("SELECT * FROM reports WHERE id = %s", (report_id,)).fetchone()
+                report = conn.execute("SELECT * FROM reports WHERE id = %s AND bot_id = %s", (report_id, bot_id)).fetchone()
                 if not report:
                     await query.answer("报告不存在。", show_alert=True)
                     return
@@ -1102,8 +1126,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             pass
         sent_admin = await query.message.reply_text(f"✅ 报告 #{report_id} 已通过审核。")
         schedule_auto_delete(context.bot, sent_admin.chat_id, sent_admin.message_id)
-        channel_link = await _push_report_to_channel(context.bot, report_id, report)
-        feedback = _build_approval_feedback(report_id, channel_link=channel_link)
+        channel_link = await _push_report_to_channel(context.bot, report_id, report, bot_id=bot_id)
+        feedback = _build_approval_feedback(report_id, channel_link=channel_link, bot_id=bot_id)
         sent_user = await context.bot.send_message(chat_id=report["user_id"], text=feedback)
         schedule_auto_delete(context.bot, sent_user.chat_id, sent_user.message_id)
         return
@@ -1113,9 +1137,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await query.answer("无权限。", show_alert=True)
             return
         report_id = data.split(":", 1)[1]
+        bot_id = _get_bot_id(context)
         try:
             with db_connection() as conn:
-                report = conn.execute("SELECT * FROM reports WHERE id = %s", (report_id,)).fetchone()
+                report = conn.execute("SELECT * FROM reports WHERE id = %s AND bot_id = %s", (report_id, bot_id)).fetchone()
         except Exception:
             logger.exception("reject callback: invalid report_id=%s", report_id)
             await query.answer("无效的报告ID。", show_alert=True)
@@ -1141,14 +1166,15 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     user = update.effective_user
-    upsert_user(user.id, user.username)
+    bot_id = _get_bot_id(context)
+    upsert_user(user.id, user.username, bot_id=bot_id)
 
-    if is_user_banned(user.id):
+    if is_user_banned(user.id, bot_id=bot_id):
         await update.message.reply_text("您已被限制使用此机器人。")
         return
 
-    channels = get_force_sub_channels()
-    if channels and not await is_subscribed(context.bot, user.id):
+    channels = get_force_sub_channels(bot_id=bot_id)
+    if channels and not await is_subscribed(context.bot, user.id, bot_id=bot_id):
         sub_text, markup = await _build_force_sub_prompt(context.bot, channels)
         sent = await update.message.reply_text(sub_text, reply_markup=markup)
         schedule_auto_delete(context.bot, sent.chat_id, sent.message_id)
@@ -1206,10 +1232,12 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_bot_admin(context, update.effective_user.id):
         await update.message.reply_text("无权限。")
         return
+    bot_id = _get_bot_id(context)
     with db_connection() as conn:
-        user_count_row = conn.execute("SELECT COUNT(*) as cnt FROM users").fetchone()
+        user_count_row = conn.execute("SELECT COUNT(*) as cnt FROM users WHERE bot_id = %s", (bot_id,)).fetchone()
         report_counts = conn.execute(
-            "SELECT status, COUNT(*) as cnt FROM reports GROUP BY status"
+            "SELECT status, COUNT(*) as cnt FROM reports WHERE bot_id = %s GROUP BY status",
+            (bot_id,),
         ).fetchall()
     total_users = user_count_row["cnt"] if user_count_row else 0
     counts = {r["status"]: r["cnt"] for r in report_counts}
@@ -1235,16 +1263,17 @@ _AUTO_CLEANUP_FIRST = 3600            # 1 hour after start
 
 async def _pending_reminder_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Periodic job: notify admins of reports pending for longer than the configured threshold."""
+    bot_id = _get_bot_id(context)
     try:
-        threshold_hours = int(setting_get("pending_reminder_threshold_hours", "24"))
+        threshold_hours = int(setting_get("pending_reminder_threshold_hours", "24", bot_id=bot_id))
     except (ValueError, TypeError):
         threshold_hours = 24
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=threshold_hours)).isoformat()
     try:
         with db_connection() as conn:
             rows = conn.execute(
-                "SELECT id, username FROM reports WHERE status='pending' AND created_at < %s ORDER BY id DESC",
-                (cutoff,),
+                "SELECT id, username FROM reports WHERE bot_id = %s AND status='pending' AND created_at < %s ORDER BY id DESC",
+                (bot_id, cutoff),
             ).fetchall()
     except Exception:
         logger.warning("pending_reminder_job: DB query failed", exc_info=True)
@@ -1269,19 +1298,20 @@ async def _pending_reminder_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def _auto_cleanup_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Periodic job: delete rejected reports older than 90 days."""
+    bot_id = _get_bot_id(context)
     cutoff = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
     try:
         with db_connection() as conn:
             cur = conn.execute(
-                "DELETE FROM reports WHERE status='rejected' AND created_at < %s",
-                (cutoff,),
+                "DELETE FROM reports WHERE bot_id = %s AND status='rejected' AND created_at < %s",
+                (bot_id, cutoff),
             )
             deleted = cur.rowcount
     except Exception:
         logger.warning("auto_cleanup_job: DB error", exc_info=True)
         return
     if deleted:
-        logger.info("auto_cleanup_job: deleted %d old rejected reports", deleted)
+        logger.info("auto_cleanup_job: deleted %d old rejected reports (bot_id=%r)", deleted, bot_id)
 
 
 async def ptb_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1314,8 +1344,13 @@ def create_bot_application(
     token: str,
     owner_user_id: int | None = None,
     admin_panel_url: str = "",
+    bot_id: str = "",
 ) -> Application:
     app = Application.builder().token(token).build()
+    # Store the bot_id ('' for main bot, str(child_bot.id) for child bots) so
+    # all handlers can scope their DB operations to this bot's data partition.
+    if bot_id:
+        app.bot_data["bot_id"] = bot_id
     # For child bots, store the sub-admin's Telegram user ID so that
     # _is_bot_admin / _get_bot_admin_ids can restrict admin commands to them only.
     if owner_user_id is not None:
@@ -1340,7 +1375,7 @@ def create_bot_application(
     if app.job_queue is not None:
         # Read the reminder check interval from DB (or env) at startup; default 2 h
         try:
-            _reminder_interval_hours = int(setting_get("pending_reminder_interval_hours", str(_PENDING_REMINDER_INTERVAL // 3600)))
+            _reminder_interval_hours = int(setting_get("pending_reminder_interval_hours", str(_PENDING_REMINDER_INTERVAL // 3600), bot_id=bot_id))
         except (ValueError, TypeError):
             _reminder_interval_hours = _PENDING_REMINDER_INTERVAL // 3600
         _reminder_interval_hours = max(1, _reminder_interval_hours)
