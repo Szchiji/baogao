@@ -326,7 +326,6 @@ input[type=password]:focus{outline:none;border-color:#4f46e5;box-shadow:0 0 0 3p
         review_rejected_template: str = Form(""),
         push_template: str = Form(""),
         report_template_json: str = Form("{}"),
-        push_detail_fields_json: str = Form("[]"),
         push_photos_enabled: str = Form(""),
         pending_reminder_threshold_hours: str = Form(""),
         pending_reminder_interval_hours: str = Form(""),
@@ -334,9 +333,6 @@ input[type=password]:focus{outline:none;border-color:#4f46e5;box-shadow:0 0 0 3p
         usage_text: str = Form(""),
         search_help_text: str = Form(""),
         report_link_base: str = Form(""),
-        clone_mode_enabled: str = Form(""),
-        clone_botfather_link: str = Form(""),
-        clone_text: str = Form(""),
     ):
         if redirect := _auth(request):
             return redirect
@@ -344,7 +340,6 @@ input[type=password]:focus{outline:none;border-color:#4f46e5;box-shadow:0 0 0 3p
             start_buttons_obj = json.loads(start_buttons_json)
             keyboard_buttons_obj = json.loads(keyboard_buttons_json)
             report_template_obj = json.loads(report_template_json)
-            push_detail_fields_obj = json.loads(push_detail_fields_json)
         except json.JSONDecodeError:
             raise HTTPException(status_code=400, detail="JSON 配置格式错误")
         if not isinstance(start_buttons_obj, list):
@@ -353,8 +348,6 @@ input[type=password]:focus{outline:none;border-color:#4f46e5;box-shadow:0 0 0 3p
             raise HTTPException(status_code=400, detail="keyboard_buttons_json 必须是数组")
         if not isinstance(report_template_obj, dict):
             raise HTTPException(status_code=400, detail="report_template_json 必须是对象")
-        if not isinstance(push_detail_fields_obj, list):
-            push_detail_fields_obj = []
 
         # Validate numeric fields
         def _safe_int(value: str, default: int, min_val: int, max_val: int) -> str:
@@ -376,7 +369,6 @@ input[type=password]:focus{outline:none;border-color:#4f46e5;box-shadow:0 0 0 3p
             "review_rejected_template": review_rejected_template,
             "push_template": push_template,
             "report_template_json": json.dumps(report_template_obj, ensure_ascii=False),
-            "push_detail_fields_json": json.dumps(push_detail_fields_obj, ensure_ascii=False),
             "push_photos_enabled": "1" if push_photos_enabled.strip() == "1" else "0",
             "pending_reminder_threshold_hours": _safe_int(pending_reminder_threshold_hours, 24, 1, 720),
             "pending_reminder_interval_hours": _safe_int(pending_reminder_interval_hours, 2, 1, 168),
@@ -384,9 +376,6 @@ input[type=password]:focus{outline:none;border-color:#4f46e5;box-shadow:0 0 0 3p
             "usage_text": usage_text,
             "search_help_text": search_help_text,
             "report_link_base": report_link_base.strip(),
-            "clone_mode_enabled": "1" if clone_mode_enabled.strip() == "1" else "0",
-            "clone_botfather_link": clone_botfather_link.strip(),
-            "clone_text": clone_text,
         }
         for key, value in updates.items():
             setting_set(key, value)

@@ -42,13 +42,9 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "usage_text": "1. 点击「写报告」填写模板\n2. 填完后提交审核\n3. 审核通过后可查阅。",
     "search_help_text": "发送 @用户名 或 #标签 查询报告。",
     "report_link_base": "",
-    "push_detail_fields_json": "[]",
     "push_photos_enabled": "1",
     "pending_reminder_threshold_hours": "24",
     "pending_reminder_interval_hours": "2",
-    "clone_mode_enabled": "0",
-    "clone_botfather_link": "",
-    "clone_text": "🤖 点击下方按钮即可一键克隆此机器人，无需手动操作 BotFather！",
 }
 
 

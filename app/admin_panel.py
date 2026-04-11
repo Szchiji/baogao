@@ -254,7 +254,6 @@ _ADMIN_JS = """
     {value:'my_reports',label:'我的报告（内置）'},
     {value:'contact',label:'联系管理员（内置）'},
     {value:'usage',label:'操作方式（内置）'},
-    {value:'clone',label:'克隆机器人（内置）'},
     {value:'text',label:'自定义回复文本'}
   ];
   function makeKbRow(item){
@@ -373,12 +372,8 @@ _ADMIN_JS = """
     serializeStartBtns();
     serializeKb();
     serializeTemplate();
-    serializePushFields();
   });
 
-  // Push Detail Fields Editor
-  var pushDetailFieldsData=__PUSH_DETAIL_FIELDS__;
-  var pushFieldsList=document.getElementById('push-detail-fields-list');
   function getTplTextFields(){
     var fields=[];
     tplFieldsEl.querySelectorAll('.tpl-field-card').forEach(function(card){
@@ -389,61 +384,6 @@ _ADMIN_JS = """
     });
     return fields;
   }
-  function makePushFieldRow(key,label){
-    var row=document.createElement('div'); row.className='editor-row'; row.dataset.key=key;
-    var span=document.createElement('span');
-    span.textContent=(label||key)+' ('+key+')'; span.style.flex='1';
-    var up=document.createElement('button');
-    up.type='button'; up.textContent='↑'; up.className='btn btn-sm';
-    up.style.cssText='padding:3px 8px;background:#f1f5f9;border:1px solid #e2e8f0;border-radius:4px;cursor:pointer;flex:none;';
-    up.addEventListener('click',function(){var prev=row.previousElementSibling;if(prev)pushFieldsList.insertBefore(row,prev);});
-    var down=document.createElement('button');
-    down.type='button'; down.textContent='↓'; down.className='btn btn-sm';
-    down.style.cssText='padding:3px 8px;background:#f1f5f9;border:1px solid #e2e8f0;border-radius:4px;cursor:pointer;flex:none;';
-    down.addEventListener('click',function(){var next=row.nextElementSibling;if(next)pushFieldsList.insertBefore(next,row);});
-    var rm=document.createElement('button');
-    rm.type='button'; rm.textContent='✕'; rm.className='btn btn-danger btn-sm';
-    rm.addEventListener('click',function(){row.remove();renderPushFieldsAddArea();});
-    row.appendChild(span); row.appendChild(up); row.appendChild(down); row.appendChild(rm);
-    return row;
-  }
-  function renderPushFieldsAddArea(){
-    var addArea=document.getElementById('push-fields-add-area');
-    addArea.innerHTML='';
-    var existingKeys={};
-    pushFieldsList.querySelectorAll('.editor-row[data-key]').forEach(function(r){existingKeys[r.dataset.key]=true;});
-    getTplTextFields().forEach(function(f){
-      if(!existingKeys[f.key]){
-        var btn=document.createElement('button');
-        btn.type='button'; btn.textContent='＋ '+f.label+' ('+f.key+')';
-        btn.className='btn-add'; btn.style.marginTop='4px';
-        btn.addEventListener('click',function(){
-          pushFieldsList.appendChild(makePushFieldRow(f.key,f.label));
-          renderPushFieldsAddArea();
-        });
-        addArea.appendChild(btn);
-      }
-    });
-  }
-  function initPushFields(){
-    pushFieldsList.innerHTML='';
-    var tplFields=getTplTextFields();
-    var labelMap={};
-    tplFields.forEach(function(f){labelMap[f.key]=f.label;});
-    var initKeys=pushDetailFieldsData.length>0?pushDetailFieldsData:tplFields.map(function(f){return f.key;});
-    initKeys.forEach(function(k){
-      if(labelMap[k]) pushFieldsList.appendChild(makePushFieldRow(k,labelMap[k]));
-    });
-    renderPushFieldsAddArea();
-  }
-  function serializePushFields(){
-    var result=[];
-    pushFieldsList.querySelectorAll('.editor-row[data-key]').forEach(function(row){
-      result.push(row.dataset.key);
-    });
-    document.getElementById('push_detail_fields_json').value=JSON.stringify(result);
-  }
-  initPushFields();
 
   // Rich Text Editor
   function serializeRTENode(node){
@@ -528,7 +468,7 @@ _ADMIN_JS = """
     };
   }
   function getPushTemplatePills(){
-    var pills=[{label:'报告ID',insert:'{id}'},{label:'用户名',insert:'{username}'},{label:'推送详情',insert:'{detail}'},{label:'报告链接',insert:'{link}'}];
+    var pills=[{label:'报告ID',insert:'{id}'},{label:'用户名',insert:'{username}'},{label:'报告链接',insert:'{link}'}];
     getTplTextFields().forEach(function(f){pills.push({label:f.label,insert:'{'+f.key+'}'});});
     return pills;
   }
@@ -684,14 +624,12 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
     start_buttons_js = safe_js("start_buttons_json", [])
     kb_buttons_js = safe_js("keyboard_buttons_json", [])
     template_js = safe_js("report_template_json", {"name": "", "fields": []})
-    push_detail_fields_js = safe_js("push_detail_fields_json", [])
 
     js = (
         _ADMIN_JS
         .replace("__START_BUTTONS__", start_buttons_js)
         .replace("__KB_BUTTONS__", kb_buttons_js)
         .replace("__TEMPLATE__", template_js)
-        .replace("__PUSH_DETAIL_FIELDS__", push_detail_fields_js)
     )
 
     pending_count = len(pending_reports) if pending_reports else 0
@@ -846,7 +784,6 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
     <button type="button" class="nav-item" data-tab="reports"><span class="nav-icon">📂</span><span class="nav-label">报告历史</span></button>
     <button type="button" class="nav-item" data-tab="blacklist"><span class="nav-icon">🚫</span><span class="nav-label">黑名单</span></button>
     <button type="button" class="nav-item" data-tab="broadcast"><span class="nav-icon">📢</span><span class="nav-label">广播发送</span></button>
-    <button type="button" class="nav-item" data-tab="clone"><span class="nav-icon">🤖</span><span class="nav-label">克隆相关设置</span></button>
     <button type="button" class="nav-item" data-tab="child-bots"><span class="nav-icon">🤖</span><span class="nav-label">子机器人管理</span></button>
   </nav>
   <div class="sidebar-footer">
@@ -1004,13 +941,6 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
           <div class="hint">支持占位符：{{id}} 报告编号、{{username}} 用户名、{{detail}} 报告字段内容、{{link}} 报告链接；点击上方字段按钮快速插入。<br>还可直接使用字段键名，如模板含 <code>title</code> 字段则可用 {{{{title}}}}（前后各两个大括号）。</div>
         </div>
         <div class="field">
-          <label>推送详情字段 — 顺序与选择</label>
-          <div class="hint" style="margin-bottom:8px">拖动排序或点击 ↑↓ 调整字段在 {{{{detail}}}} 中的显示顺序；点击 ✕ 从推送中排除该字段。留空则默认包含全部文本字段。</div>
-          <div id="push-detail-fields-list"></div>
-          <div id="push-fields-add-area" style="margin-top:8px"></div>
-          <input type="hidden" name="push_detail_fields_json" id="push_detail_fields_json">
-        </div>
-        <div class="field">
           <label>推送图片 — 开关</label>
           <label style="display:flex;align-items:center;gap:8px;font-weight:normal;font-size:.88rem;cursor:pointer;text-transform:none;letter-spacing:0;color:#374151">
             <input type="checkbox" name="push_photos_enabled" value="1"{'checked' if settings_map.get('push_photos_enabled','1') == '1' else ''}>
@@ -1123,44 +1053,15 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
       </div>
     </div>
 
-    <div id="pane-clone" class="tab-pane">
-      <p class="section-title">克隆相关设置</p>
-      <div class="card">
-        <div style="margin-bottom:20px;padding:14px 16px;background:#eff6ff;border-radius:8px;border:1px solid #bfdbfe;font-size:.85rem;color:#1d4ed8;line-height:1.8">
-          <b>🔧 开启一键克隆功能需完成两步：</b><br>
-          1️⃣ 在本页开启「一键克隆模式」并填入 BotFather 克隆链接<br>
-          2️⃣ 在 @BotFather：打开按钮 → 选择机器人 → Bot Settings → 开启 Bot Management Mode
-        </div>
-        <div class="field">
-          <label>一键克隆模式</label>
-          <label style="display:flex;align-items:center;gap:8px;font-weight:normal;font-size:.88rem;cursor:pointer;text-transform:none;letter-spacing:0;color:#374151">
-            <input type="checkbox" name="clone_mode_enabled" value="1"{'checked' if settings_map.get('clone_mode_enabled','0') == '1' else ''}>
-            开启后，在 /start 欢迎消息及键盘「克隆机器人」按钮中展示克隆入口
-          </label>
-          <div class="hint" style="margin-top:4px">同时需要在 @BotFather 开启 Bot Management Mode，两步都完成功能才会生效。</div>
-        </div>
-        <div class="field">
-          <label>BotFather 克隆链接</label>
-          <input type="text" name="clone_botfather_link" value="{e('clone_botfather_link')}" placeholder="https://t.me/BotFather?start=...">
-          <div class="hint">在 @BotFather 开启 Bot Management Mode 后，BotFather 会提供专属克隆链接，粘贴至此。</div>
-        </div>
-        <div class="field">
-          <label>克隆按钮说明文字</label>
-          <textarea name="clone_text" rows="3">{e('clone_text')}</textarea>
-          <div class="hint">用户点击「克隆机器人」键盘按钮时收到的说明文字（/start 内联按钮无需额外文字）。</div>
-        </div>
-      </div>
-    </div>
-
     <div id="pane-child-bots" class="tab-pane">
       <p class="section-title">子机器人管理</p>
       <div class="card">
         <div style="margin-bottom:16px;padding:14px 16px;background:#eff6ff;border-radius:8px;border:1px solid #bfdbfe;font-size:.85rem;color:#1d4ed8;line-height:1.8">
           <b>📖 使用说明</b><br>
-          1️⃣ 用户通过一键克隆在 @BotFather 创建新机器人，获得 Bot Token<br>
+          1️⃣ 在 @BotFather 创建新机器人，获得 Bot Token<br>
           2️⃣ 将该 Token 及其 Telegram 用户 ID 填入下方，点击「添加」<br>
           3️⃣ 系统立即启动子机器人，仅该子管理员可使用管理命令<br>
-          子机器人与主机器人共享同一后端，拥有完整功能。
+          子机器人是一款全新的独立机器人，拥有自己独立的设置，与主机器人互不影响。
         </div>
         <div class="field">
           <label>Bot Token</label>

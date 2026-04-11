@@ -157,9 +157,8 @@ async def send_start_content(update: Update, context: ContextTypes.DEFAULT_TYPE)
     media_type = setting_get("start_media_type", "").strip().lower()
     media_url = setting_get("start_media_url", "").strip()
     user_id = update.effective_user.id if update.effective_user else None
-    hide_clone = _is_child_bot(context)
-    inline_markup = start_inline_buttons(user_id=user_id, hide_clone=hide_clone)
-    keyboard = start_keyboard(hide_clone=hide_clone)
+    inline_markup = start_inline_buttons(user_id=user_id)
+    keyboard = start_keyboard()
     if media_type == "photo" and media_url:
         await update.effective_chat.send_photo(
             photo=media_url,
@@ -541,21 +540,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(setting_get("contact_text"))
     elif action == "usage":
         await update.message.reply_text(setting_get("usage_text"))
-    elif action == "clone":
-        if _is_child_bot(context):
-            await update.message.reply_text("此机器人不支持克隆功能。")
-            return
-        if setting_get("clone_mode_enabled", "0") != "1":
-            await update.message.reply_text("一键克隆功能暂未开启。")
-            return
-        clone_link = setting_get("clone_botfather_link", "").strip()
-        clone_text = setting_get("clone_text", DEFAULT_SETTINGS["clone_text"])
-        markup = None
-        if clone_link:
-            markup = InlineKeyboardMarkup(
-                [[InlineKeyboardButton("🤖 一键克隆机器人", url=clone_link)]]
-            )
-        await update.message.reply_text(clone_text, reply_markup=markup)
     else:
         await update.message.reply_text(item.get("value") or "已收到。")
 
