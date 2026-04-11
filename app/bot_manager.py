@@ -49,8 +49,12 @@ async def _poll_child(app: Application) -> None:
                 pass
 
 
-async def start_child_bot(token: str) -> bool:
+async def start_child_bot(token: str, owner_user_id: int | None = None) -> bool:
     """Start a child bot by *token*.
+
+    *owner_user_id* is the Telegram user ID of the sub-admin who owns this
+    child bot.  When provided it is stored in ``bot_data["child_admin_id"]``
+    so that admin commands are restricted to that user only.
 
     Returns ``True`` if the bot was started, ``False`` if it was already
     running.  Raises on configuration or network errors.
@@ -59,7 +63,7 @@ async def start_child_bot(token: str) -> bool:
         logger.debug("Child bot already running (token=…%s)", token[-8:])
         return False
 
-    app = create_bot_application(token)
+    app = create_bot_application(token, owner_user_id=owner_user_id)
     task = asyncio.create_task(_poll_child(app))
 
     def _on_done(t: "asyncio.Task[None]") -> None:
@@ -105,8 +109,9 @@ async def start_all_from_db() -> int:
         if not cb.get("active"):
             continue
         token = cb["token"]
+        owner_user_id = cb.get("owner_user_id")
         try:
-            ok = await start_child_bot(token)
+            ok = await start_child_bot(token, owner_user_id=owner_user_id)
             if ok:
                 started += 1
         except Exception:

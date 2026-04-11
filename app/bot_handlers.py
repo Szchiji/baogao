@@ -65,6 +65,24 @@ logger = logging.getLogger("report-bot")
 _AUTO_DELETE_DELAY = 86400  # 24 hours in seconds
 
 
+def _get_bot_admin_ids(context: ContextTypes.DEFAULT_TYPE) -> list[int]:
+    """Return the effective admin user IDs for the current bot instance.
+
+    For child bots the ``bot_data["child_admin_id"]`` is the sole admin (the
+    sub-admin / owner who registered this bot).  For the main bot this falls
+    back to the ``ADMIN_USER_IDS`` environment variable.
+    """
+    child_admin_id = context.bot_data.get("child_admin_id")
+    if child_admin_id is not None:
+        return [int(child_admin_id)]
+    return get_admin_user_ids()
+
+
+def _is_bot_admin(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
+    """Return True when *user_id* is an admin of the current bot instance."""
+    return user_id in _get_bot_admin_ids(context)
+
+
 async def _delete_after(bot: Bot, chat_id: int, message_id: int, delay: int) -> None:
     """Delete a message after *delay* seconds. Errors are silently ignored."""
     await asyncio.sleep(delay)
@@ -176,7 +194,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_user_admin(update.effective_user.id):
+    if not _is_bot_admin(context, update.effective_user.id):
         await update.message.reply_text("无权限。")
         return
     base_url = (context.bot_data.get("admin_panel_url") or setting_get("admin_panel_url")).strip()
@@ -388,7 +406,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     active_draft = context.user_data.get("report_draft")
     if (
         pending_reject_id is not None
-        and is_user_admin(update.effective_user.id)
+        and _is_bot_admin(context, update.effective_user.id)
         and not (active_draft and active_draft.get("awaiting"))
     ):
         context.user_data.pop("pending_reject_id", None)
@@ -470,7 +488,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 await update.message.reply_text("⚠️ 验证尝试过于频繁，请稍后再试。")
                 return
             _record_verify_attempt(user.id)
-            if is_user_admin(user.id):
+            if _is_bot_admin(context, user.id):
                 otp = secrets.token_urlsafe(16)
                 _otp_tokens[otp] = time.time() + _OTP_TOKEN_TTL
                 _verify_code_otps[text] = otp
@@ -582,7 +600,7 @@ async def submit_report(context: ContextTypes.DEFAULT_TYPE, update: Update) -> N
     schedule_auto_delete(context.bot, sent_confirm.chat_id, sent_confirm.message_id)
 
     # Notify all admins with inline approve/reject buttons
-    admin_ids = get_admin_user_ids()
+    admin_ids = _get_bot_admin_ids(context)
     if admin_ids:
         preview = render_report_preview(values, template)
         submitter_id = update.effective_user.id
@@ -743,7 +761,7 @@ async def _push_report_to_channel(bot: Bot, report_id: int, report: dict) -> str
 
 
 async def pending_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_user_admin(update.effective_user.id):
+    if not _is_bot_admin(context, update.effective_user.id):
         await update.message.reply_text("无权限。")
         return
     with db_connection() as conn:
@@ -761,7 +779,7 @@ async def pending_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def approve_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_user_admin(update.effective_user.id):
+    if not _is_bot_admin(context, update.effective_user.id):
         await update.message.reply_text("无权限。")
         return
     if not context.args:
@@ -798,7 +816,7 @@ def _build_reject_markup(report_id: int) -> InlineKeyboardMarkup:
 
 
 async def reject_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_user_admin(update.effective_user.id):
+    if not _is_bot_admin(context, update.effective_user.id):
         await update.message.reply_text("无权限。")
         return
     if not context.args:
@@ -834,7 +852,7 @@ async def reject_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def ban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_user_admin(update.effective_user.id):
+    if not _is_bot_admin(context, update.effective_user.id):
         await update.message.reply_text("无权限。")
         return
     if not context.args:
@@ -851,7 +869,7 @@ async def ban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def unban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_user_admin(update.effective_user.id):
+    if not _is_bot_admin(context, update.effective_user.id):
         await update.message.reply_text("无权限。")
         return
     if not context.args:
@@ -1043,7 +1061,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     if data.startswith("approve:"):
-        if not is_user_admin(update.effective_user.id):
+        if not _is_bot_admin(context, update.effective_user.id):
             await query.answer("无权限。", show_alert=True)
             return
         report_id = data.split(":", 1)[1]
@@ -1079,7 +1097,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     if data.startswith("reject:"):
-        if not is_user_admin(update.effective_user.id):
+        if not _is_bot_admin(context, update.effective_user.id):
             await query.answer("无权限。", show_alert=True)
             return
         report_id = data.split(":", 1)[1]
@@ -1173,7 +1191,7 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_user_admin(update.effective_user.id):
+    if not _is_bot_admin(context, update.effective_user.id):
         await update.message.reply_text("无权限。")
         return
     with db_connection() as conn:
@@ -1230,7 +1248,7 @@ async def _pending_reminder_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         f"{ids_str}\n\n"
         f"请前往管理后台或使用 /pending 命令处理。"
     )
-    for admin_id in get_admin_user_ids():
+    for admin_id in _get_bot_admin_ids(context):
         try:
             await context.bot.send_message(chat_id=admin_id, text=msg)
         except Exception:
@@ -1280,8 +1298,12 @@ async def ptb_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) 
     )
 
 
-def create_bot_application(token: str) -> Application:
+def create_bot_application(token: str, owner_user_id: int | None = None) -> Application:
     app = Application.builder().token(token).build()
+    # For child bots, store the sub-admin's Telegram user ID so that
+    # _is_bot_admin / _get_bot_admin_ids can restrict admin commands to them only.
+    if owner_user_id is not None:
+        app.bot_data["child_admin_id"] = owner_user_id
     app.add_error_handler(ptb_error_handler)
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("admin", admin_cmd))

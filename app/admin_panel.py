@@ -588,14 +588,15 @@ _ADMIN_JS = """
     fetch('/admin/child-bots',{credentials:'include'}).then(function(r){return r.json();}).then(function(data){
       var bots=data.bots||[];
       if(!bots.length){container.innerHTML='<p style="color:#6b7280;font-size:.88rem">暂无子机器人。</p>';return;}
-      var html='<table class="table"><thead><tr><th>机器人</th><th>状态</th><th>添加时间</th><th>操作</th></tr></thead><tbody>';
+      var html='<table class="table"><thead><tr><th>机器人</th><th>子管理员 ID</th><th>状态</th><th>添加时间</th><th>操作</th></tr></thead><tbody>';
       bots.forEach(function(b){
         var name=b.bot_name?(b.bot_name+(b.bot_username?' (@'+b.bot_username+')':'')):(b.bot_username?('@'+b.bot_username):'ID '+b.id);
         var running=b.running;
         var active=b.active;
+        var ownerCell=b.owner_user_id?('<code style="font-size:.82rem">'+b.owner_user_id+'</code>'):'<em style="color:#94a3b8;font-size:.8rem">未设置</em>';
         var statusBadge=running?'<span style="background:#dcfce7;color:#166534;border:1px solid #86efac;padding:2px 8px;border-radius:10px;font-size:.72rem;font-weight:700">✅ 运行中</span>':'<span style="background:#fee2e2;color:#991b1b;border:1px solid #fca5a5;padding:2px 8px;border-radius:10px;font-size:.72rem;font-weight:700">⏹ 已停止</span>';
         var toggleLabel=active?'停用':'启用';
-        html+='<tr><td>'+name+'</td><td>'+statusBadge+'</td><td style="white-space:nowrap;font-size:.82rem">'+((b.created_at||'').substring(0,19))+'</td><td style="white-space:nowrap"><button class="btn btn-secondary btn-sm" onclick="toggleChildBot('+b.id+','+(!active)+')" style="margin-right:4px">'+toggleLabel+'</button><button class="btn btn-danger btn-sm" onclick="removeChildBot('+b.id+')">删除</button></td></tr>';
+        html+='<tr><td>'+name+'</td><td>'+ownerCell+'</td><td>'+statusBadge+'</td><td style="white-space:nowrap;font-size:.82rem">'+((b.created_at||'').substring(0,19))+'</td><td style="white-space:nowrap"><button class="btn btn-secondary btn-sm" onclick="toggleChildBot('+b.id+','+(!active)+')" style="margin-right:4px">'+toggleLabel+'</button><button class="btn btn-danger btn-sm" onclick="removeChildBot('+b.id+')">删除</button></td></tr>';
       });
       html+='</tbody></table>';
       container.innerHTML=html;
@@ -611,20 +612,24 @@ _ADMIN_JS = """
   (function(){
     var addBtn=document.getElementById('child-bot-add-btn');
     var tokenInput=document.getElementById('child-bot-token-input');
+    var ownerInput=document.getElementById('child-bot-owner-input');
     var msg=document.getElementById('child-bot-add-msg');
     if(!addBtn) return;
     addBtn.addEventListener('click',function(){
       var token=(tokenInput.value||'').trim();
+      var ownerRaw=(ownerInput?ownerInput.value||'':'').trim();
       if(!token){msg.style.color='#ef4444';msg.textContent='请输入 Bot Token';return;}
+      if(!ownerRaw||!/^\\d+$/.test(ownerRaw)){msg.style.color='#ef4444';msg.textContent='请输入子管理员的 Telegram 数字用户 ID';return;}
       addBtn.disabled=true;
       msg.style.color='#6b7280';
       msg.textContent='验证中，请稍候…';
-      fetch('/admin/child-bots/add',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({token:token})}).then(function(r){return r.json().then(function(d){return{ok:r.ok,data:d};});}).then(function(res){
+      fetch('/admin/child-bots/add',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({token:token,owner_user_id:ownerRaw})}).then(function(r){return r.json().then(function(d){return{ok:r.ok,data:d};});}).then(function(res){
         addBtn.disabled=false;
         if(res.ok){
           msg.style.color='#16a34a';
           msg.textContent='✅ 已成功添加并启动：'+(res.data.bot_name||'')+(res.data.bot_username?' (@'+res.data.bot_username+')':'');
           tokenInput.value='';
+          if(ownerInput)ownerInput.value='';
           loadChildBots();
         } else {
           msg.style.color='#ef4444';
@@ -1153,20 +1158,25 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
         <div style="margin-bottom:16px;padding:14px 16px;background:#eff6ff;border-radius:8px;border:1px solid #bfdbfe;font-size:.85rem;color:#1d4ed8;line-height:1.8">
           <b>📖 使用说明</b><br>
           1️⃣ 用户通过一键克隆在 @BotFather 创建新机器人，获得 Bot Token<br>
-          2️⃣ 将该 Token 粘贴至下方输入框，点击「添加」<br>
-          3️⃣ 系统立即启动子机器人，无需重新部署<br>
+          2️⃣ 将该 Token 及其 Telegram 用户 ID 填入下方，点击「添加」<br>
+          3️⃣ 系统立即启动子机器人，仅该子管理员可使用管理命令<br>
           子机器人与主机器人共享同一后端，拥有完整功能。
         </div>
         <div class="field">
-          <label>添加子机器人 Token</label>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start">
-            <input type="text" id="child-bot-token-input" placeholder="粘贴 Bot Token（例如 123456:ABC…）" style="flex:1;min-width:240px">
-            <button type="button" class="btn btn-success" id="child-bot-add-btn">＋ 添加并启动</button>
-          </div>
-          <div class="hint">Token 来自 @BotFather。添加后系统会验证 Token 并立即启动机器人。</div>
-          <div id="child-bot-add-msg" style="margin-top:6px;font-size:.85rem"></div>
+          <label>Bot Token</label>
+          <input type="text" id="child-bot-token-input" placeholder="粘贴 Bot Token（例如 123456:ABC…）">
+          <div class="hint">Token 来自 @BotFather。</div>
         </div>
         <div class="field">
+          <label>子管理员 Telegram 用户 ID</label>
+          <input type="text" id="child-bot-owner-input" placeholder="例如 123456789（必填）" inputmode="numeric">
+          <div class="hint">子机器人的管理员的 Telegram 数字 ID。只有该用户才能使用 /admin、/pending、/approve 等管理命令。可通过 @userinfobot 获取。</div>
+        </div>
+        <div style="margin-top:8px">
+          <button type="button" class="btn btn-success" id="child-bot-add-btn">＋ 添加并启动</button>
+          <div id="child-bot-add-msg" style="margin-top:6px;font-size:.85rem"></div>
+        </div>
+        <div class="field" style="margin-top:20px">
           <label>已注册的子机器人</label>
           <div id="child-bots-list" style="margin-top:8px">
             <div style="color:#6b7280;font-size:.88rem">加载中…</div>
