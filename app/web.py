@@ -391,6 +391,7 @@ input[type=password]:focus{outline:none;border-color:rgba(99,102,241,.55);box-sh
         usage_text: str = Form(""),
         search_help_text: str = Form(""),
         report_link_base: str = Form(""),
+        return_tab: str = Form("", alias="_return_tab"),
     ):
         if redirect := _auth(request):
             return redirect
@@ -438,7 +439,10 @@ input[type=password]:focus{outline:none;border-color:rgba(99,102,241,.55);box-sh
         }
         for key, value in updates.items():
             setting_set(key, value, bot_id=bot_id)
-        return RedirectResponse(url="/admin?saved=1", status_code=303)
+        # Redirect back to the tab the user was editing; default to "basic"
+        _allowed_tabs = {"basic", "welcome", "keyboard", "template", "texts", "review"}
+        tab = return_tab.strip() if return_tab.strip() in _allowed_tabs else "basic"
+        return RedirectResponse(url=f"/admin?saved=1&tab={tab}", status_code=303)
 
     @web.get("/admin/settings")
     async def admin_settings(request: Request):

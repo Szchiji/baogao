@@ -297,6 +297,7 @@ _ADMIN_JS = """
   });
   var noSaveTabs=['pending','blacklist','broadcast','reports','child-bots'];
 
+  var returnTabInput=document.getElementById('settings-return-tab');
   function switchTab(tab){
     tabPanes.forEach(function(p){p.classList.remove('active');});
     var pane=document.getElementById('pane-'+tab);
@@ -305,6 +306,8 @@ _ADMIN_JS = """
     if(saveBar)saveBar.style.display=noSaveTabs.indexOf(tab)>=0?'none':'flex';
     var sec=tabSection[tab]||currentSection;
     sectionLastTab[sec]=tab;
+    // Keep the hidden return-tab field in sync so the server redirects back here after save
+    if(returnTabInput&&noSaveTabs.indexOf(tab)<0)returnTabInput.value=tab;
     if(tab==='review'&&_rteMap['push_template'])_rteMap['push_template'].refreshPills();
     if(tab==='broadcast'&&_rteMap['broadcast_text'])_rteMap['broadcast_text'].refreshPills();
   }
@@ -975,6 +978,7 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
     {saved_banner}
 
     <form id="settings-form" method="post" action="/admin/save">
+    <input type="hidden" name="_return_tab" id="settings-return-tab" value="basic">
 
     <div id="pane-basic" class="tab-pane{_active_if('basic')}">
       <p class="section-title">基本设置</p>

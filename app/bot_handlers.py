@@ -235,8 +235,10 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     }
     login_url = f"{base_url.rstrip('/')}/admin/otp?token={otp}"
     await update.message.reply_text(
-        f"🔐 您的后台登录链接（{_OTP_TOKEN_TTL // 60} 分钟内有效）：\n{login_url}",
-        disable_web_page_preview=True,
+        f"🔐 点击下方按钮登录管理后台（链接 {_OTP_TOKEN_TTL // 60} 分钟内有效）",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("🚀 打开管理后台", url=login_url)]]
+        ),
     )
 
 
@@ -528,7 +530,11 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     "bot_id": bot_id,
                 }
                 _verify_code_otps[text] = otp
-                base_url = (context.bot_data.get("admin_panel_url") or setting_get("admin_panel_url")).strip()
+                base_url = (
+                    context.bot_data.get("admin_panel_url")
+                    or setting_get("admin_panel_url", bot_id=bot_id)
+                    or os.getenv("ADMIN_PANEL_URL", "")
+                ).strip()
                 if base_url:
                     await update.message.reply_text(f"✅ 身份验证成功！后台页面将自动跳转，请在 {_OTP_TOKEN_TTL // 60} 分钟内返回浏览器。")
                 else:
