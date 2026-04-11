@@ -88,18 +88,21 @@ def _error_page(message: str, link_text: str = "重新验证", link_href: str = 
 <html lang="zh">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="dark">
 <title>错误</title>
 <style>
 *{{box-sizing:border-box;margin:0;padding:0}}
-body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#070912;background-image:radial-gradient(ellipse 80% 50% at 50% 50%,rgba(244,63,94,.04) 0%,transparent 70%);display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px;-webkit-font-smoothing:antialiased}}
-.card{{background:rgba(255,255,255,.04);backdrop-filter:blur(20px) saturate(160%);-webkit-backdrop-filter:blur(20px) saturate(160%);border:1px solid rgba(255,255,255,.1);border-radius:16px;box-shadow:0 8px 32px rgba(0,0,0,.6),inset 0 1px 0 rgba(255,255,255,.06);padding:40px 36px;width:100%;max-width:420px;text-align:center;position:relative;overflow:hidden}}
-.card::before{{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent 0%,rgba(255,255,255,.1) 50%,transparent 100%);pointer-events:none}}
-.icon{{font-size:2.8rem;margin-bottom:16px}}
-h2{{font-size:1.1rem;font-weight:700;color:#dde2ed;margin-bottom:8px}}
-p{{font-size:.85rem;color:#8b95b0;line-height:1.6;margin-bottom:24px}}
-a{{display:inline-block;padding:9px 24px;background:#6366f1;color:#fff;border-radius:7px;text-decoration:none;font-size:.88rem;font-weight:600;transition:all .15s;box-shadow:0 2px 8px rgba(99,102,241,.3)}}
-a:hover{{background:#4f46e5;box-shadow:0 4px 14px rgba(99,102,241,.4);transform:translateY(-1px)}}
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#070912;background-image:radial-gradient(ellipse 80% 50% at 50% 50%,rgba(244,63,94,.05) 0%,transparent 70%);display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px;-webkit-font-smoothing:antialiased}}
+.card{{background:rgba(255,255,255,.04);backdrop-filter:blur(22px) saturate(160%) brightness(1.03);-webkit-backdrop-filter:blur(22px) saturate(160%) brightness(1.03);border:1px solid rgba(255,255,255,.09);border-radius:16px;box-shadow:0 8px 32px rgba(0,0,0,.6),inset 0 1px 0 rgba(255,255,255,.06);padding:40px 36px;width:100%;max-width:420px;text-align:center;position:relative;overflow:hidden}}
+.card::before{{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent 5%,rgba(255,255,255,.11) 40%,rgba(255,255,255,.13) 50%,rgba(255,255,255,.11) 60%,transparent 95%);pointer-events:none}}
+.card::after{{content:'';position:absolute;top:0;left:0;right:0;bottom:0;background:linear-gradient(135deg,rgba(255,255,255,.05) 0%,transparent 45%);pointer-events:none;border-radius:inherit}}
+.icon{{font-size:2.8rem;margin-bottom:16px;position:relative;z-index:1}}
+h2{{font-size:1.1rem;font-weight:700;color:#dde2ed;margin-bottom:8px;position:relative;z-index:1}}
+p{{font-size:.85rem;color:#8b95b0;line-height:1.6;margin-bottom:24px;position:relative;z-index:1}}
+a{{display:inline-flex;align-items:center;justify-content:center;padding:10px 24px;min-height:40px;background:#6366f1;color:#fff;border-radius:8px;text-decoration:none;font-size:.88rem;font-weight:600;transition:background .15s,box-shadow .15s,transform .12s;box-shadow:0 2px 8px rgba(99,102,241,.35);position:relative;z-index:1}}
+a:hover{{background:#4f46e5;box-shadow:0 4px 16px rgba(99,102,241,.45);transform:translateY(-1px)}}
+a:focus-visible{{outline:none;box-shadow:0 0 0 2px rgba(7,9,18,1),0 0 0 4px #6366f1}}
 </style>
 </head>
 <body>
@@ -263,24 +266,27 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
 <html lang="zh">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="dark">
 <title>管理员登录</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#070912;background-image:radial-gradient(ellipse 80% 50% at 30% 40%,rgba(99,102,241,.06) 0%,transparent 70%);display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px;-webkit-font-smoothing:antialiased}
-.card{background:rgba(255,255,255,.04);backdrop-filter:blur(20px) saturate(160%);-webkit-backdrop-filter:blur(20px) saturate(160%);border:1px solid rgba(255,255,255,.1);border-radius:16px;box-shadow:0 8px 32px rgba(0,0,0,.6),inset 0 1px 0 rgba(255,255,255,.06);padding:40px 36px;width:100%;max-width:420px;position:relative;overflow:hidden}
-.card::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent 0%,rgba(255,255,255,.1) 50%,transparent 100%);pointer-events:none}
-.logo{text-align:center;margin-bottom:28px}
+.card{background:rgba(255,255,255,.04);backdrop-filter:blur(22px) saturate(160%) brightness(1.03);-webkit-backdrop-filter:blur(22px) saturate(160%) brightness(1.03);border:1px solid rgba(255,255,255,.09);border-radius:16px;box-shadow:0 8px 32px rgba(0,0,0,.6),inset 0 1px 0 rgba(255,255,255,.06);padding:40px 36px;width:100%;max-width:420px;position:relative;overflow:hidden}
+.card::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent 5%,rgba(255,255,255,.11) 40%,rgba(255,255,255,.13) 50%,rgba(255,255,255,.11) 60%,transparent 95%);pointer-events:none}
+.card::after{content:'';position:absolute;top:0;left:0;right:0;bottom:0;background:linear-gradient(135deg,rgba(255,255,255,.05) 0%,transparent 45%);pointer-events:none;border-radius:inherit}
+.logo{text-align:center;margin-bottom:28px;position:relative;z-index:1}
 .logo-icon{font-size:2.2rem;margin-bottom:10px}
-.logo h1{font-size:1.15rem;font-weight:700;color:#dde2ed;letter-spacing:-.01em}
+.logo h1{font-size:1.15rem;font-weight:700;color:#dde2ed;letter-spacing:-.012em}
 .logo p{font-size:.83rem;color:#8b95b0;margin-top:5px}
-label{display:block;font-size:.72rem;font-weight:600;color:#8b95b0;text-transform:uppercase;letter-spacing:.055em;margin-bottom:5px}
-input[type=password]{width:100%;padding:9px 13px;border:1px solid rgba(255,255,255,.1);border-radius:7px;font-size:.88rem;font-family:inherit;background:rgba(0,0,0,.28);color:#dde2ed;transition:border-color .15s,box-shadow .15s;-webkit-appearance:none}
-input[type=password]::placeholder{color:#5a6480;opacity:.8}
-input[type=password]:focus{outline:none;border-color:rgba(99,102,241,.5);box-shadow:0 0 0 3px rgba(99,102,241,.11)}
-.field{margin-bottom:20px}
-.btn{display:block;width:100%;padding:10px;background:#6366f1;color:#fff;border:none;border-radius:7px;font-size:.88rem;font-weight:600;font-family:inherit;cursor:pointer;transition:all .15s;text-align:center;box-shadow:0 2px 8px rgba(99,102,241,.3)}
-.btn:hover{background:#4f46e5;box-shadow:0 4px 14px rgba(99,102,241,.4);transform:translateY(-1px)}
+label{display:block;font-size:.71rem;font-weight:600;color:#8b95b0;text-transform:uppercase;letter-spacing:.06em;margin-bottom:5px}
+input[type=password]{width:100%;padding:9px 13px;min-height:40px;border:1px solid rgba(255,255,255,.1);border-radius:8px;font-size:.88rem;font-family:inherit;background:rgba(0,0,0,.3);color:#dde2ed;transition:border-color .15s,box-shadow .15s;-webkit-appearance:none}
+input[type=password]::placeholder{color:#5a6480;opacity:.75}
+input[type=password]:focus{outline:none;border-color:rgba(99,102,241,.55);box-shadow:0 0 0 3px rgba(99,102,241,.13)}
+.field{margin-bottom:20px;position:relative;z-index:1}
+.btn{display:flex;align-items:center;justify-content:center;width:100%;padding:10px;min-height:42px;background:#6366f1;color:#fff;border:none;border-radius:8px;font-size:.88rem;font-weight:600;font-family:inherit;cursor:pointer;transition:background .15s,box-shadow .15s,transform .12s;box-shadow:0 2px 8px rgba(99,102,241,.35);position:relative;z-index:1}
+.btn:hover{background:#4f46e5;box-shadow:0 4px 16px rgba(99,102,241,.45);transform:translateY(-1px)}
+.btn:focus-visible{outline:none;box-shadow:0 0 0 2px rgba(7,9,18,1),0 0 0 4px #6366f1}
 </style>
 </head>
 <body>
@@ -292,8 +298,8 @@ input[type=password]:focus{outline:none;border-color:rgba(99,102,241,.5);box-sha
   </div>
   <form method="get" action="/admin">
     <div class="field">
-      <label>管理员密码</label>
-      <input type="password" name="token" placeholder="ADMIN_PANEL_TOKEN" autofocus>
+      <label for="token">管理员密码</label>
+      <input type="password" id="token" name="token" placeholder="ADMIN_PANEL_TOKEN" autofocus autocomplete="current-password">
     </div>
     <button type="submit" class="btn">🔐 登录</button>
   </form>
@@ -454,19 +460,22 @@ input[type=password]:focus{outline:none;border-color:rgba(99,102,241,.5);box-sha
 <html lang="zh">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="dark">
 <title>管理员验证</title>
 <style>
 *{{box-sizing:border-box;margin:0;padding:0}}
 body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#070912;background-image:radial-gradient(ellipse 80% 50% at 50% 40%,rgba(99,102,241,.07) 0%,transparent 70%);display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px;-webkit-font-smoothing:antialiased}}
-.card{{background:rgba(255,255,255,.04);backdrop-filter:blur(20px) saturate(160%);-webkit-backdrop-filter:blur(20px) saturate(160%);border:1px solid rgba(255,255,255,.1);border-radius:16px;box-shadow:0 8px 32px rgba(0,0,0,.6),inset 0 1px 0 rgba(255,255,255,.06);padding:36px 32px;max-width:440px;width:100%;text-align:center;position:relative;overflow:hidden}}
-.card::before{{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent 0%,rgba(255,255,255,.1) 50%,transparent 100%);pointer-events:none}}
-h2{{font-size:1.15rem;color:#dde2ed;margin-bottom:8px;font-weight:700}}
-p{{color:#8b95b0;font-size:.85rem;margin-bottom:20px;line-height:1.6}}
-.code-box{{background:rgba(99,102,241,.1);border:1.5px dashed rgba(99,102,241,.4);border-radius:10px;padding:20px;margin:20px 0;font-size:1.9rem;font-weight:700;letter-spacing:.3em;color:#a5b4fc;font-family:monospace}}
-.step{{background:rgba(99,102,241,.08);border:1px solid rgba(99,102,241,.2);border-radius:8px;padding:12px 16px;text-align:left;font-size:.83rem;color:#93c5fd;line-height:1.9;margin-bottom:16px}}
+.card{{background:rgba(255,255,255,.04);backdrop-filter:blur(22px) saturate(160%) brightness(1.03);-webkit-backdrop-filter:blur(22px) saturate(160%) brightness(1.03);border:1px solid rgba(255,255,255,.09);border-radius:16px;box-shadow:0 8px 32px rgba(0,0,0,.6),inset 0 1px 0 rgba(255,255,255,.06);padding:36px 32px;max-width:440px;width:100%;text-align:center;position:relative;overflow:hidden}}
+.card::before{{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent 5%,rgba(255,255,255,.11) 40%,rgba(255,255,255,.13) 50%,rgba(255,255,255,.11) 60%,transparent 95%);pointer-events:none}}
+.card::after{{content:'';position:absolute;top:0;left:0;right:0;bottom:0;background:linear-gradient(135deg,rgba(255,255,255,.05) 0%,transparent 45%);pointer-events:none;border-radius:inherit}}
+h2{{font-size:1.15rem;color:#dde2ed;margin-bottom:8px;font-weight:700;position:relative;z-index:1}}
+p{{color:#8b95b0;font-size:.85rem;margin-bottom:20px;line-height:1.6;position:relative;z-index:1}}
+.code-box{{background:rgba(99,102,241,.1);border:1.5px dashed rgba(99,102,241,.4);border-radius:10px;padding:20px;margin:20px 0;font-size:1.9rem;font-weight:700;letter-spacing:.3em;color:#a5b4fc;font-family:monospace;position:relative;z-index:1;cursor:pointer;transition:background .15s}}
+.code-box:hover{{background:rgba(99,102,241,.15)}}
+.step{{background:rgba(99,102,241,.08);border:1px solid rgba(99,102,241,.2);border-radius:9px;padding:12px 16px;text-align:left;font-size:.83rem;color:#93c5fd;line-height:1.9;margin-bottom:16px;position:relative;z-index:1}}
 .step b{{color:#a5b4fc}}
-.waiting{{color:#5a6480;font-size:.83rem;margin-top:16px}}
+.waiting{{color:#5a6480;font-size:.83rem;margin-top:16px;position:relative;z-index:1}}
 </style>
 </head>
 <body>
@@ -480,12 +489,21 @@ p{{color:#8b95b0;font-size:.85rem;margin-bottom:20px;line-height:1.6}}
     3. 将验证码发送给机器人<br>
     4. 机器人确认后，此页面将自动跳转到后台
   </div>
-  <div class="code-box" id="code-display">{code}</div>
-  <p class="waiting" id="status-msg">⏳ 等待您在 Telegram 中发送验证码…</p>
+  <div class="code-box" id="code-display" title="点击复制" tabindex="0" role="button" aria-label="验证码：{code}，点击复制">{code}</div>
+  <p class="waiting" id="status-msg" aria-live="polite">⏳ 等待您在 Telegram 中发送验证码…</p>
 </div>
 <script>
 (function(){{
   var code='{code}';
+  // Copy on click
+  var box=document.getElementById('code-display');
+  if(box){{
+    function copyCode(){{
+      try{{navigator.clipboard.writeText(code);box.title='已复制！';setTimeout(function(){{box.title='点击复制';}},2000);}}catch(e){{}}
+    }}
+    box.addEventListener('click',copyCode);
+    box.addEventListener('keydown',function(e){{if(e.key==='Enter'||e.key===' '){{e.preventDefault();copyCode();}}}}); 
+  }}
   var interval=setInterval(function(){{
     fetch('/admin/verify/status?code='+encodeURIComponent(code))
       .then(function(r){{return r.json();}})
