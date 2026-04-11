@@ -502,7 +502,7 @@ p{{color:#8b95b0;font-size:.85rem;margin-bottom:20px;line-height:1.6;position:re
       try{{navigator.clipboard.writeText(code);box.title='已复制！';setTimeout(function(){{box.title='点击复制';}},2000);}}catch(e){{}}
     }}
     box.addEventListener('click',copyCode);
-    box.addEventListener('keydown',function(e){{if(e.key==='Enter'||e.key===' ')copyCode();}});
+    box.addEventListener('keydown',function(e){{if(e.key==='Enter'||e.key===' '){{e.preventDefault();copyCode();}}}}); 
   }}
   var interval=setInterval(function(){{
     fetch('/admin/verify/status?code='+encodeURIComponent(code))
