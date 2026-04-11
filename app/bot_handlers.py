@@ -211,7 +211,11 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     _cleanup_verify_state()
     otp = secrets.token_urlsafe(16)
-    _otp_tokens[otp] = time.time() + _OTP_TOKEN_TTL
+    child_admin_id = context.bot_data.get("child_admin_id")
+    _otp_tokens[otp] = {
+        "expiry": time.time() + _OTP_TOKEN_TTL,
+        "owner_user_id": int(child_admin_id) if child_admin_id is not None else None,
+    }
     login_url = f"{base_url.rstrip('/')}/admin/otp?token={otp}"
     await update.message.reply_text(
         f"🔐 您的后台登录链接（{_OTP_TOKEN_TTL // 60} 分钟内有效）：\n{login_url}",
@@ -498,7 +502,11 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             _record_verify_attempt(user.id)
             if _is_bot_admin(context, user.id):
                 otp = secrets.token_urlsafe(16)
-                _otp_tokens[otp] = time.time() + _OTP_TOKEN_TTL
+                child_admin_id = context.bot_data.get("child_admin_id")
+                _otp_tokens[otp] = {
+                    "expiry": time.time() + _OTP_TOKEN_TTL,
+                    "owner_user_id": int(child_admin_id) if child_admin_id is not None else None,
+                }
                 _verify_code_otps[text] = otp
                 base_url = (context.bot_data.get("admin_panel_url") or setting_get("admin_panel_url")).strip()
                 if base_url:

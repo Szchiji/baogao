@@ -6,6 +6,10 @@ from app.crud import setting_get
 from app.keyboards import report_template
 from app.utils import parse_json
 
+# Tabs that are only shown to the main admin; child-bot sub-admins cannot see these.
+_MAIN_ADMIN_ONLY_TABS = frozenset(
+    {"basic", "welcome", "keyboard", "template", "texts", "review", "broadcast", "child-bots"}
+)
 
 def report_to_html(report_row: dict) -> str:
     data = parse_json(report_row["data_json"], {})
@@ -605,7 +609,7 @@ def _render_report_content_for_admin(data_json: str, tpl_fields: list[dict[str, 
     return "<br>".join(parts) if parts else "<em style='color:#94a3b8'>（无内容）</em>"
 
 
-def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] | None = None, saved: bool = False, user_count: int = 0, db_path: str = "", blacklist: list[dict] | None = None, all_reports: list[dict] | None = None, stats: dict | None = None, initial_tab: str = "basic") -> str:
+def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] | None = None, saved: bool = False, user_count: int = 0, db_path: str = "", blacklist: list[dict] | None = None, all_reports: list[dict] | None = None, stats: dict | None = None, initial_tab: str = "basic", is_child_admin: bool = False) -> str:
     def e(key: str) -> str:
         return html.escape(settings_map.get(key, ""))
 
@@ -740,6 +744,22 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
 
     saved_banner = "<div class='alert alert-success'>✅ 配置已保存成功！</div>" if saved else ""
 
+    # For child-admin sessions show a notice and restrict the UI to report/blacklist tabs only.
+    child_admin_banner = (
+        "<div class='alert' style='background:#fef3c7;color:#92400e;border-left:4px solid #f59e0b'>"
+        "⚠️ 您以子管理员身份登录，仅可查看和审核报告及黑名单，无权修改系统设置。"
+        "</div>"
+        if is_child_admin else ""
+    )
+
+    # Nav items that child admins are not allowed to see
+    _hidden_if_child = "style='display:none'" if is_child_admin else ""
+    # The first active nav tab differs for child vs main admin
+    _first_tab = "pending" if is_child_admin else "basic"
+    # Override initial_tab to a visible tab for child admins
+    if is_child_admin and initial_tab in _MAIN_ADMIN_ONLY_TABS:
+        initial_tab = "pending"
+
     # Build stats bar
     _stats = stats or {}
     total_reports = _stats.get("total_reports", 0)
@@ -754,6 +774,10 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
         f"<option value='{v}'{' selected' if v == current_media_type else ''}>{label}</option>"
         for v, label in media_types
     )
+
+    def _active_if(tab: str) -> str:
+        """Return ' active' if this tab should be the initial visible pane."""
+        return " active" if tab == initial_tab else ""
 
     return f"""<!DOCTYPE html>
 <html lang="zh">
@@ -773,19 +797,19 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
     <div class="subtitle">管理后台</div>
   </div>
   <nav class="sidebar-nav">
-    <div class="nav-group">内容管理</div>
-    <button type="button" class="nav-item active" data-tab="basic"><span class="nav-icon">⚙️</span><span class="nav-label">基本设置</span></button>
-    <button type="button" class="nav-item" data-tab="welcome"><span class="nav-icon">👋</span><span class="nav-label">欢迎消息</span></button>
-    <button type="button" class="nav-item" data-tab="keyboard"><span class="nav-icon">⌨️</span><span class="nav-label">底部菜单</span></button>
-    <button type="button" class="nav-item" data-tab="template"><span class="nav-icon">📝</span><span class="nav-label">报告模板</span></button>
-    <button type="button" class="nav-item" data-tab="texts"><span class="nav-icon">💬</span><span class="nav-label">文本配置</span></button>
-    <button type="button" class="nav-item" data-tab="review"><span class="nav-icon">🔍</span><span class="nav-label">审核设置</span></button>
+    <div class="nav-group" {_hidden_if_child}>内容管理</div>
+    <button type="button" class="nav-item" data-tab="basic" {_hidden_if_child}><span class="nav-icon">⚙️</span><span class="nav-label">基本设置</span></button>
+    <button type="button" class="nav-item" data-tab="welcome" {_hidden_if_child}><span class="nav-icon">👋</span><span class="nav-label">欢迎消息</span></button>
+    <button type="button" class="nav-item" data-tab="keyboard" {_hidden_if_child}><span class="nav-icon">⌨️</span><span class="nav-label">底部菜单</span></button>
+    <button type="button" class="nav-item" data-tab="template" {_hidden_if_child}><span class="nav-icon">📝</span><span class="nav-label">报告模板</span></button>
+    <button type="button" class="nav-item" data-tab="texts" {_hidden_if_child}><span class="nav-icon">💬</span><span class="nav-label">文本配置</span></button>
+    <button type="button" class="nav-item" data-tab="review" {_hidden_if_child}><span class="nav-icon">🔍</span><span class="nav-label">审核设置</span></button>
     <div class="nav-group">操作</div>
     <button type="button" class="nav-item" data-tab="pending"><span class="nav-icon">⏳</span><span class="nav-label">待审核报告</span>{pending_nav_badge}</button>
     <button type="button" class="nav-item" data-tab="reports"><span class="nav-icon">📂</span><span class="nav-label">报告历史</span></button>
     <button type="button" class="nav-item" data-tab="blacklist"><span class="nav-icon">🚫</span><span class="nav-label">黑名单</span></button>
-    <button type="button" class="nav-item" data-tab="broadcast"><span class="nav-icon">📢</span><span class="nav-label">广播发送</span></button>
-    <button type="button" class="nav-item" data-tab="child-bots"><span class="nav-icon">🤖</span><span class="nav-label">子机器人管理</span></button>
+    <button type="button" class="nav-item" data-tab="broadcast" {_hidden_if_child}><span class="nav-icon">📢</span><span class="nav-label">广播发送</span></button>
+    <button type="button" class="nav-item" data-tab="child-bots" {_hidden_if_child}><span class="nav-icon">🤖</span><span class="nav-label">子机器人管理</span></button>
   </nav>
   <div class="sidebar-footer">
     <a href="/admin/logout">🚪 退出登录</a>
@@ -802,11 +826,12 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
   </div>
 
   <div class="content">
+    {child_admin_banner}
     {saved_banner}
 
     <form id="settings-form" method="post" action="/admin/save">
 
-    <div id="pane-basic" class="tab-pane active">
+    <div id="pane-basic" class="tab-pane{_active_if('basic')}">
       <p class="section-title">基本设置</p>
       <div class="card">
         <div class="field-row">
@@ -971,7 +996,7 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
     </form>
     <form id="import-settings-form" method="post" action="/admin/import-settings"></form>
 
-    <div id="pane-pending" class="tab-pane">
+    <div id="pane-pending" class="tab-pane{_active_if('pending')}">
       <p class="section-title">待审核报告（{pending_count} 条）</p>
       <div class="card" style="padding:0;overflow:hidden">
         <div style="padding:14px 18px;border-bottom:1px solid var(--bdr);display:flex;align-items:center;justify-content:space-between">

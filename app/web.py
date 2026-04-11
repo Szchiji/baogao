@@ -22,6 +22,8 @@ from app.admin_auth import (
     _verify_code_otps,
     _verify_codes,
     _VERIFY_CODE_TTL,
+    create_child_admin_session,
+    get_child_admin_id,
 )
 from app.admin_panel import build_admin_html, report_to_html
 from app.bot_handlers import _build_approval_feedback, _build_reject_markup, _push_report_to_channel
@@ -189,6 +191,13 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
             raise HTTPException(status_code=404, detail="report not found")
         return report_to_html(row)
 
+    def _get_request_child_admin_id(request: Request) -> int | None:
+        """Return the owner_user_id if the request carries a valid child-admin session."""
+        session = request.cookies.get("admin_child_session", "")
+        if not session:
+            return None
+        return get_child_admin_id(session)
+
     def _auth(request: Request) -> RedirectResponse | None:
         if not config.admin_panel_token:
             return None
@@ -198,7 +207,20 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
         query_token = request.query_params.get("token", "")
         if query_token == config.admin_panel_token:
             return None
+        # Child-bot sub-admins log in with a restricted session cookie instead.
+        if _get_request_child_admin_id(request) is not None:
+            return None
         return RedirectResponse(url="/admin/login", status_code=303)
+
+    def _is_main_admin(request: Request) -> bool:
+        """Return True only for the full (main) admin — not child-admin sessions."""
+        if not config.admin_panel_token:
+            return True
+        cookie_token = request.cookies.get("admin_token", "")
+        if cookie_token == config.admin_panel_token:
+            return True
+        query_token = request.query_params.get("token", "")
+        return query_token == config.admin_panel_token
 
     def _should_set_admin_cookie(request: Request) -> bool:
         if not config.admin_panel_token:
@@ -264,12 +286,15 @@ input[type=password]:focus{outline:none;border-color:#4f46e5;box-shadow:0 0 0 3p
     async def admin_logout():
         response = HTMLResponse("已退出。")
         response.delete_cookie("admin_token")
+        response.delete_cookie("admin_child_session")
         return response
 
     @web.get("/admin", response_class=HTMLResponse)
     async def admin_page(request: Request):
         if redirect := _auth(request):
             return redirect
+        child_admin_id = _get_request_child_admin_id(request)
+        is_child_admin = child_admin_id is not None
         should_set_cookie = _should_set_admin_cookie(request)
         saved = request.query_params.get("saved") == "1"
         with db_connection() as conn:
@@ -294,13 +319,16 @@ input[type=password]:focus{outline:none;border-color:#4f46e5;box-shadow:0 0 0 3p
         stats = {r["status"]: r["cnt"] for r in report_stats}
         stats["total_reports"] = sum(stats.values())
         all_reports_list = [dict(r) for r in all_report_rows]
+        # Child-admin default tab is the pending review queue.
+        default_tab = "pending" if is_child_admin else "basic"
         response = HTMLResponse(build_admin_html(
             settings_map, pending_list, saved=saved,
             user_count=user_count, db_path="",
             blacklist=blacklist_list,
             all_reports=all_reports_list,
             stats=stats,
-            initial_tab=request.query_params.get("tab", "basic"),
+            initial_tab=request.query_params.get("tab", default_tab),
+            is_child_admin=is_child_admin,
         ))
         if should_set_cookie:
             response.set_cookie(
@@ -336,6 +364,8 @@ input[type=password]:focus{outline:none;border-color:#4f46e5;box-shadow:0 0 0 3p
     ):
         if redirect := _auth(request):
             return redirect
+        if not _is_main_admin(request):
+            raise HTTPException(status_code=403, detail="子管理员无权修改系统设置")
         try:
             start_buttons_obj = json.loads(start_buttons_json)
             keyboard_buttons_obj = json.loads(keyboard_buttons_json)
@@ -469,9 +499,13 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
         _cleanup_verify_state()
         if not token or token not in _otp_tokens:
             return HTMLResponse(_error_page("链接无效或已过期，请重新获取验证码。"), status_code=403)
-        if time.time() > _otp_tokens[token]:
+        token_data = _otp_tokens.get(token)
+        is_dict_format = isinstance(token_data, dict)
+        expiry = token_data["expiry"] if is_dict_format else token_data
+        if time.time() > expiry:
             _otp_tokens.pop(token, None)
             return HTMLResponse(_error_page("登录链接已过期，请重新获取验证码。"), status_code=403)
+        owner_user_id: int | None = token_data.get("owner_user_id") if is_dict_format else None
         # Consume the token
         _otp_tokens.pop(token, None)
         if not config.admin_panel_token:
@@ -482,23 +516,36 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
         # may not be committed to storage before the browser issues the follow-up
         # GET /admin request.  An explicit JS + meta-refresh redirect from a 200
         # response guarantees the cookie is stored first.
-        response = HTMLResponse("""<!DOCTYPE html>
+        redirect_url = "/admin?tab=pending" if owner_user_id is not None else "/admin"
+        response = HTMLResponse(f"""<!DOCTYPE html>
 <html lang="zh"><head>
 <meta charset="utf-8">
-<meta http-equiv="refresh" content="0; url=/admin">
-<script>window.location.replace('/admin');</script>
+<meta http-equiv="refresh" content="0; url={redirect_url}">
+<script>window.location.replace('{redirect_url}');</script>
 </head>
 <body style="font-family:sans-serif;padding:40px">
 ✅ 验证成功，正在跳转到后台…<br>
-如果页面没有自动跳转，请<a href="/admin">点击这里</a>。
+如果页面没有自动跳转，请<a href="{redirect_url}">点击这里</a>。
 </body></html>""")
-        response.set_cookie(
-            key="admin_token",
-            value=config.admin_panel_token,
-            httponly=True,
-            samesite="lax",
-            secure=_is_secure_request(request),
-        )
+        if owner_user_id is not None:
+            # Child-bot sub-admin: issue a restricted session cookie instead of
+            # the full admin_panel_token cookie so the panel can show a limited view.
+            session_token = create_child_admin_session(owner_user_id)
+            response.set_cookie(
+                key="admin_child_session",
+                value=session_token,
+                httponly=True,
+                samesite="lax",
+                secure=_is_secure_request(request),
+            )
+        else:
+            response.set_cookie(
+                key="admin_token",
+                value=config.admin_panel_token,
+                httponly=True,
+                samesite="lax",
+                secure=_is_secure_request(request),
+            )
         return response
 
     # ---- Blacklist web routes ----
@@ -541,6 +588,8 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
     async def admin_import_settings(request: Request, settings_json: str = Form("")):
         if redirect := _auth(request):
             return redirect
+        if not _is_main_admin(request):
+            raise HTTPException(status_code=403, detail="子管理员无权导入系统设置")
         try:
             data = json.loads(settings_json)
         except json.JSONDecodeError:
@@ -691,6 +740,8 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
     ):
         if redirect := _auth(request):
             return redirect
+        if not _is_main_admin(request):
+            raise HTTPException(status_code=403, detail="子管理员无权执行广播操作")
         with db_connection() as conn:
             user_rows = conn.execute("SELECT user_id FROM users").fetchall()
         user_ids = [r["user_id"] for r in user_rows]
@@ -720,6 +771,8 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
     async def child_bots_list(request: Request):
         if redirect := _auth(request):
             return redirect
+        if not _is_main_admin(request):
+            raise HTTPException(status_code=403, detail="子管理员无权访问子机器人管理")
         from app import bot_manager
 
         bots = list_child_bots()
@@ -735,6 +788,8 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
     async def child_bot_add(request: Request):
         if redirect := _auth(request):
             return redirect
+        if not _is_main_admin(request):
+            raise HTTPException(status_code=403, detail="子管理员无权添加子机器人")
         from app import bot_manager
 
         body = await request.json()
@@ -775,6 +830,8 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
     async def child_bot_remove(request: Request):
         if redirect := _auth(request):
             return redirect
+        if not _is_main_admin(request):
+            raise HTTPException(status_code=403, detail="子管理员无权删除子机器人")
         from app import bot_manager
 
         body = await request.json()
@@ -796,6 +853,8 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
     async def child_bot_toggle(request: Request):
         if redirect := _auth(request):
             return redirect
+        if not _is_main_admin(request):
+            raise HTTPException(status_code=403, detail="子管理员无权管理子机器人")
         from app import bot_manager
 
         body = await request.json()
