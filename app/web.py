@@ -584,6 +584,8 @@ p{{color:#8b95b0;font-size:.85rem;margin-bottom:20px;line-height:1.6;position:re
         if owner_user_id is not None:
             # Child-bot sub-admin: issue a restricted session cookie instead of
             # the full admin_panel_token cookie so the panel can show a limited view.
+            # Clear any existing full-admin cookie so it cannot override the child session.
+            response.delete_cookie("admin_token")
             session_token = create_child_admin_session(owner_user_id, bot_id=token_bot_id)
             response.set_cookie(
                 key="admin_child_session",
@@ -593,6 +595,8 @@ p{{color:#8b95b0;font-size:.85rem;margin-bottom:20px;line-height:1.6;position:re
                 secure=_is_secure_request(request),
             )
         else:
+            # Full admin login — clear any stale child-admin session cookie.
+            response.delete_cookie("admin_child_session")
             response.set_cookie(
                 key="admin_token",
                 value=config.admin_panel_token,
