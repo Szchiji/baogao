@@ -2,6 +2,7 @@ import asyncio
 import html
 import json
 import logging
+import os
 import secrets
 import time
 from datetime import datetime, timedelta, timezone
@@ -157,7 +158,14 @@ async def send_start_content(update: Update, context: ContextTypes.DEFAULT_TYPE)
     media_type = setting_get("start_media_type", "").strip().lower()
     media_url = setting_get("start_media_url", "").strip()
     user_id = update.effective_user.id if update.effective_user else None
-    inline_markup = start_inline_buttons(user_id=user_id)
+    # Use the per-bot admin_panel_url from bot_data (set for child bots), falling
+    # back to the DB setting, then the global env var.
+    bot_admin_url = (
+        context.bot_data.get("admin_panel_url")
+        or setting_get("admin_panel_url")
+        or os.getenv("ADMIN_PANEL_URL", "")
+    ).strip() or None
+    inline_markup = start_inline_buttons(user_id=user_id, admin_panel_url=bot_admin_url)
     keyboard = start_keyboard()
     if media_type == "photo" and media_url:
         await update.effective_chat.send_photo(
@@ -1302,12 +1310,20 @@ async def ptb_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) 
     )
 
 
-def create_bot_application(token: str, owner_user_id: int | None = None) -> Application:
+def create_bot_application(
+    token: str,
+    owner_user_id: int | None = None,
+    admin_panel_url: str = "",
+) -> Application:
     app = Application.builder().token(token).build()
     # For child bots, store the sub-admin's Telegram user ID so that
     # _is_bot_admin / _get_bot_admin_ids can restrict admin commands to them only.
     if owner_user_id is not None:
         app.bot_data["child_admin_id"] = owner_user_id
+    # Store the per-bot admin panel URL so that /admin and the start inline
+    # button direct the sub-admin to the correct admin panel instance.
+    if admin_panel_url:
+        app.bot_data["admin_panel_url"] = admin_panel_url
     app.add_error_handler(ptb_error_handler)
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("admin", admin_cmd))

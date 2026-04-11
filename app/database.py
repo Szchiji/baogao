@@ -122,9 +122,14 @@ def init_db() -> None:
               bot_name TEXT,
               owner_user_id BIGINT,
               created_at TEXT NOT NULL,
-              active INTEGER NOT NULL DEFAULT 1
+              active INTEGER NOT NULL DEFAULT 1,
+              admin_panel_url TEXT
             )
             """
+        )
+        # Migration: add admin_panel_url column if it was created without it.
+        conn.execute(
+            "ALTER TABLE child_bots ADD COLUMN IF NOT EXISTS admin_panel_url TEXT"
         )
         # Insert default settings only if they don't already exist, so existing
         # configured values are never overwritten on restart/redeploy.

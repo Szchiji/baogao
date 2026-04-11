@@ -804,6 +804,7 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
                 owner_user_id = int(str(raw_owner).strip())
             except ValueError:
                 raise HTTPException(status_code=400, detail="owner_user_id 必须是数字 Telegram 用户 ID") from None
+        admin_panel_url = (body.get("admin_panel_url") or "").strip()
         # Validate token by fetching bot info from Telegram.
         bot_username = ""
         bot_name = ""
@@ -815,12 +816,12 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"无效的 Bot Token：{exc}") from exc
         try:
-            add_child_bot(token, bot_username=bot_username, bot_name=bot_name, owner_user_id=owner_user_id)
+            add_child_bot(token, bot_username=bot_username, bot_name=bot_name, owner_user_id=owner_user_id, admin_panel_url=admin_panel_url)
         except Exception as exc:
             raise HTTPException(status_code=409, detail=f"该 Token 已存在：{exc}") from exc
         # Start immediately if the event loop is running.
         try:
-            await bot_manager.start_child_bot(token, owner_user_id=owner_user_id)
+            await bot_manager.start_child_bot(token, owner_user_id=owner_user_id, admin_panel_url=admin_panel_url)
         except Exception:
             logger.exception("child_bot_add: failed to start child bot @%s", bot_username)
         logger.info("admin: child bot added @%s (owner=%s)", bot_username, owner_user_id)
@@ -868,9 +869,10 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
             raise HTTPException(status_code=404, detail="子机器人不存在")
         token = cb["token"]
         owner_user_id = cb.get("owner_user_id")
+        admin_panel_url = cb.get("admin_panel_url") or ""
         set_child_bot_active(token, active)
         if active:
-            await bot_manager.start_child_bot(token, owner_user_id=owner_user_id)
+            await bot_manager.start_child_bot(token, owner_user_id=owner_user_id, admin_panel_url=admin_panel_url)
         else:
             await bot_manager.stop_child_bot(token)
         return JSONResponse({"ok": True, "active": active})
