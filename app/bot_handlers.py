@@ -83,6 +83,14 @@ def _is_bot_admin(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
     return user_id in _get_bot_admin_ids(context)
 
 
+def _is_child_bot(context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Return True when this Application instance is a child bot (not the main bot).
+
+    Child bots have ``bot_data["child_admin_id"]`` set at startup.
+    """
+    return context.bot_data.get("child_admin_id") is not None
+
+
 async def _delete_after(bot: Bot, chat_id: int, message_id: int, delay: int) -> None:
     """Delete a message after *delay* seconds. Errors are silently ignored."""
     await asyncio.sleep(delay)
@@ -149,8 +157,9 @@ async def send_start_content(update: Update, context: ContextTypes.DEFAULT_TYPE)
     media_type = setting_get("start_media_type", "").strip().lower()
     media_url = setting_get("start_media_url", "").strip()
     user_id = update.effective_user.id if update.effective_user else None
-    inline_markup = start_inline_buttons(user_id=user_id)
-    keyboard = start_keyboard()
+    hide_clone = _is_child_bot(context)
+    inline_markup = start_inline_buttons(user_id=user_id, hide_clone=hide_clone)
+    keyboard = start_keyboard(hide_clone=hide_clone)
     if media_type == "photo" and media_url:
         await update.effective_chat.send_photo(
             photo=media_url,
@@ -533,6 +542,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     elif action == "usage":
         await update.message.reply_text(setting_get("usage_text"))
     elif action == "clone":
+        if _is_child_bot(context):
+            await update.message.reply_text("此机器人不支持克隆功能。")
+            return
         if setting_get("clone_mode_enabled", "0") != "1":
             await update.message.reply_text("一键克隆功能暂未开启。")
             return
