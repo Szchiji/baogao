@@ -18,6 +18,7 @@ DEFAULT_SETTINGS: dict[str, str] = {
         [
             {"text": "写报告", "action": "write_report"},
             {"text": "查阅报告", "action": "search_help"},
+            {"text": "我的报告", "action": "my_reports"},
             {"text": "联系管理员", "action": "contact"},
             {"text": "操作方式", "action": "usage"},
         ],
@@ -42,6 +43,9 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "search_help_text": "发送 @用户名 或 #标签 查询报告。",
     "report_link_base": "",
     "push_detail_fields_json": "[]",
+    "push_photos_enabled": "1",
+    "pending_reminder_threshold_hours": "24",
+    "pending_reminder_interval_hours": "2",
 }
 
 

@@ -251,6 +251,7 @@ _ADMIN_JS = """
   var KB_ACTIONS=[
     {value:'write_report',label:'写报告（内置）'},
     {value:'search_help',label:'查阅报告（内置）'},
+    {value:'my_reports',label:'我的报告（内置）'},
     {value:'contact',label:'联系管理员（内置）'},
     {value:'usage',label:'操作方式（内置）'},
     {value:'text',label:'自定义回复文本'}
@@ -636,6 +637,7 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
 
     if pending_reports:
         tpl_fields = report_template()["fields"]
+        all_pending_ids = ",".join(str(r["id"]) for r in pending_reports)
         rows_html = ""
         for r in pending_reports:
             content_html = _render_report_content_for_admin(r.get("data_json", "{}"), tpl_fields)
@@ -654,9 +656,11 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
                 "</td></tr>"
             )
         pending_html = (
-            "<div style='margin-bottom:12px'>"
+            f"<form method='post' action='/admin/batch-approve' style='margin-bottom:12px;display:flex;align-items:center;gap:10px'>"
+            f"<input type='hidden' name='ids' value='{html.escape(all_pending_ids)}'>"
+            f"<button class='btn btn-success' type='submit' onclick=\"return confirm('确认全部通过 {pending_count} 条待审核报告？')\">✅ 全部通过（{pending_count}条）</button>"
             "<a href='/admin#tab=pending' onclick='location.reload();return false;' style='font-size:.85rem;color:#2563eb;text-decoration:none'>🔄 刷新列表</a>"
-            "</div>"
+            "</form>"
             "<table class='table'><thead><tr>"
             "<th>ID</th><th>用户</th><th>提交时间</th><th>报告内容</th><th>操作</th>"
             "</tr></thead><tbody>" + rows_html + "</tbody></table>"
@@ -942,6 +946,26 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
           <div id="push-fields-add-area" style="margin-top:8px"></div>
           <input type="hidden" name="push_detail_fields_json" id="push_detail_fields_json">
         </div>
+        <div class="field">
+          <label>推送图片 — 开关</label>
+          <label style="display:flex;align-items:center;gap:8px;font-weight:normal;font-size:.88rem;cursor:pointer;text-transform:none;letter-spacing:0;color:#374151">
+            <input type="checkbox" name="push_photos_enabled" value="1"{'checked' if settings_map.get('push_photos_enabled','1') == '1' else ''}>
+            审核通过后，将报告中的图片字段也推送到频道
+          </label>
+          <div class="hint" style="margin-top:4px">开启后，文字推送完成后会依次发送图片字段；关闭则仅推送文字内容。</div>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>待审提醒 — 触发阈值（小时）</label>
+            <input type="number" name="pending_reminder_threshold_hours" value="{e('pending_reminder_threshold_hours') or '24'}" min="1" max="720" style="width:100px">
+            <div class="hint">报告待审超过此时长（小时）后向管理员发送提醒，默认 24。</div>
+          </div>
+          <div class="field">
+            <label>待审提醒 — 检查间隔（小时）</label>
+            <input type="number" name="pending_reminder_interval_hours" value="{e('pending_reminder_interval_hours') or '2'}" min="1" max="168" style="width:100px">
+            <div class="hint">每隔多少小时触发一次检查，默认 2。修改后需重启 Bot 生效。</div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -966,10 +990,11 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
     <div id="pane-reports" class="tab-pane">
       <p class="section-title">报告历史（共 {total_reports} 条）</p>
       <div class="card" style="padding:0;overflow:hidden">
-        <div style="padding:14px 18px;border-bottom:1px solid var(--bdr);display:flex;align-items:center;gap:12px">
+        <div style="padding:14px 18px;border-bottom:1px solid var(--bdr);display:flex;align-items:center;gap:12px;flex-wrap:wrap">
           <span style="font-size:.85rem;color:var(--txt2)">
             ✅ 已通过 {approved_count} &nbsp; ❌ 已驳回 {rejected_count} &nbsp; ⏳ 待审核 {pending_count}
           </span>
+          <a href="/admin/export-reports" class="btn btn-secondary btn-sm" style="text-decoration:none;margin-left:auto">⬇️ 导出 CSV</a>
         </div>
         {all_reports_html}
       </div>

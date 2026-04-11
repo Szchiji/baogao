@@ -4,6 +4,7 @@ import json
 import logging
 import secrets
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from telegram import (
@@ -35,7 +36,10 @@ from app.admin_auth import (
 from app.config import DEFAULT_SETTINGS, get_admin_user_ids, is_user_admin
 from app.crud import (
     ban_user,
+    get_user_reports,
+    is_rate_limited_submission,
     is_user_banned,
+    log_audit,
     setting_get,
     unban_user,
     upsert_user,
@@ -205,7 +209,7 @@ async def write_report_flow(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     first_field = fields[0]
     draft["awaiting"] = first_field["key"]
     draft["sequential"] = True
-    prompt, markup = _make_field_prompt(first_field, sequential=True)
+    prompt, markup = _make_field_prompt(first_field, sequential=True, current_idx=0, total=len(fields))
     sent = await update.message.reply_text(
         f"📝 开始填写《{draft['template']['name']}》\n\n{prompt}",
         reply_markup=markup,
@@ -215,48 +219,130 @@ async def write_report_flow(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     schedule_auto_delete(context.bot, sent.chat_id, sent.message_id)
 
 
-async def query_reports(text: str) -> str:
-    if text.startswith("@"):
-        username = text[1:]
+_QUERY_PAGE_SIZE = 5
+
+
+async def _do_query_page(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    query_type: str,
+    query_value: str,
+    page: int,
+    edit_message: Any = None,
+) -> None:
+    """Fetch and display one page of query results. *query_type* is 'a' (username) or 'h' (tag)."""
+    offset = page * _QUERY_PAGE_SIZE
+    limit = _QUERY_PAGE_SIZE
+
+    if query_type == "a":
         with db_connection() as conn:
             rows = conn.execute(
                 """
-                SELECT id, username, tag, data_json, created_at, channel_message_link
+                SELECT id, username, tag, created_at, channel_message_link
                 FROM reports
-                WHERE status = 'approved' AND username = %s
-                ORDER BY id DESC LIMIT 10
+                WHERE status = 'approved' AND username ILIKE %s
+                ORDER BY id DESC LIMIT %s OFFSET %s
                 """,
-                (username,),
-            ).fetchall()
-    elif text.startswith("#"):
-        with db_connection() as conn:
-            rows = conn.execute(
-                """
-                SELECT id, username, tag, data_json, created_at, channel_message_link
-                FROM reports
-                WHERE status = 'approved' AND tag = %s
-                ORDER BY id DESC LIMIT 10
-                """,
-                (text,),
+                (query_value, limit + 1, offset),
             ).fetchall()
     else:
-        return setting_get("search_help_text", DEFAULT_SETTINGS["search_help_text"])
+        with db_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, username, tag, created_at, channel_message_link
+                FROM reports
+                WHERE status = 'approved' AND tag ILIKE %s
+                ORDER BY id DESC LIMIT %s OFFSET %s
+                """,
+                (query_value, limit + 1, offset),
+            ).fetchall()
+
+    has_more = len(rows) > limit
+    rows = list(rows)[:limit]
+
     if not rows:
-        return "未找到匹配报告。"
-    link_base = setting_get("report_link_base", "").strip()
-    lines = ["查询结果："]
-    for row in rows:
-        channel_link = row["channel_message_link"] if row["channel_message_link"] else ""
-        if channel_link:
-            link = channel_link
-        elif link_base:
-            link = f"{link_base.rstrip('/')}/reports/{row['id']}"
-        else:
-            link = f"报告ID: {row['id']}"
-        lines.append(
-            f"- #{row['id']} @{row['username'] or 'unknown'} {row['tag'] or ''}\n  {link}"
-        )
-    return "\n".join(lines)
+        text = "未找到匹配报告。" if page == 0 else "没有更多结果了。"
+    else:
+        link_base = setting_get("report_link_base", "").strip()
+        header = f"查询结果（第 {page + 1} 页）：" if page > 0 else "查询结果："
+        lines = [header]
+        for row in rows:
+            channel_link = row["channel_message_link"] if row["channel_message_link"] else ""
+            if channel_link:
+                link = channel_link
+            elif link_base:
+                link = f"{link_base.rstrip('/')}/reports/{row['id']}"
+            else:
+                link = f"报告ID: {row['id']}"
+            lines.append(
+                f"- #{row['id']} @{row['username'] or 'unknown'} {row['tag'] or ''}\n  {link}"
+            )
+        text = "\n".join(lines)
+
+    buttons: list[list[InlineKeyboardButton]] = []
+    if page > 0:
+        buttons.append([InlineKeyboardButton("← 上一页", callback_data=f"qp:{page - 1}:{query_type}:{query_value}")])
+    if has_more:
+        buttons.append([InlineKeyboardButton("下一页 →", callback_data=f"qp:{page + 1}:{query_type}:{query_value}")])
+    markup = InlineKeyboardMarkup(buttons) if buttons else None
+
+    if edit_message:
+        try:
+            await edit_message.edit_text(text, reply_markup=markup)
+        except Exception:
+            pass
+    elif update.message:
+        await update.message.reply_text(text, reply_markup=markup)
+
+
+async def query_reports(text: str) -> str:
+    """Legacy single-page query; kept for plain-text fallback."""
+    return setting_get("search_help_text", DEFAULT_SETTINGS["search_help_text"])
+
+
+_MY_REPORTS_PAGE_SIZE = 5
+_STATUS_LABELS = {"pending": "⏳ 待审核", "approved": "✅ 已通过", "rejected": "❌ 已驳回"}
+
+
+async def my_reports_flow(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    page: int = 0,
+    edit_message: Any = None,
+) -> None:
+    """Show the calling user's own submitted reports with pagination."""
+    user_id = update.effective_user.id
+    reports = get_user_reports(user_id, offset=page * _MY_REPORTS_PAGE_SIZE, limit=_MY_REPORTS_PAGE_SIZE)
+    has_more = len(reports) > _MY_REPORTS_PAGE_SIZE
+    reports = reports[:_MY_REPORTS_PAGE_SIZE]
+
+    if not reports and page == 0:
+        text = "您还没有提交过报告。"
+    else:
+        lines = [f"📋 我的报告（第 {page + 1} 页）：" if page > 0 else "📋 我的报告："]
+        for r in reports:
+            status_label = _STATUS_LABELS.get(r["status"], r["status"])
+            tag_str = f" {r['tag']}" if r.get("tag") else ""
+            date_str = str(r.get("created_at", ""))[:10]
+            lines.append(f"#{r['id']}{tag_str} {status_label} （{date_str}）")
+            if r["status"] == "rejected" and r.get("review_feedback"):
+                lines.append(f"  驳回原因：{r['review_feedback']}")
+        text = "\n".join(lines)
+
+    buttons: list[list[InlineKeyboardButton]] = []
+    if page > 0:
+        buttons.append([InlineKeyboardButton("← 上一页", callback_data=f"mrp:{page - 1}")])
+    if has_more:
+        buttons.append([InlineKeyboardButton("下一页 →", callback_data=f"mrp:{page + 1}")])
+    markup = InlineKeyboardMarkup(buttons) if buttons else None
+
+    if edit_message:
+        try:
+            await edit_message.edit_text(text, reply_markup=markup)
+        except Exception:
+            pass
+    elif update.message:
+        await update.message.reply_text(text, reply_markup=markup)
 
 
 async def _delete_prompt_message(context: ContextTypes.DEFAULT_TYPE, draft: dict[str, Any]) -> None:
@@ -319,12 +405,16 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "UPDATE reports SET status='rejected', review_feedback=%s, reviewed_at=%s WHERE id = %s",
                 (reason, utc_now_iso(), pending_reject_id),
             )
+        log_audit(update.effective_user.id, "reject", int(pending_reject_id), note=reason)
         tpl = (
             setting_get("review_rejected_template", "").strip()
             or DEFAULT_SETTINGS["review_rejected_template"]
         )
         feedback = safe_format(tpl, id=pending_reject_id, reason=reason)
-        sent_feedback = await context.bot.send_message(chat_id=report["user_id"], text=feedback)
+        sent_feedback = await context.bot.send_message(
+            chat_id=report["user_id"], text=feedback,
+            reply_markup=_build_reject_markup(int(pending_reject_id)),
+        )
         schedule_auto_delete(context.bot, sent_feedback.chat_id, sent_feedback.message_id)
         sent_admin_reply = await update.message.reply_text(f"报告 #{pending_reject_id} 已驳回。")
         schedule_auto_delete(context.bot, sent_admin_reply.chat_id, sent_admin_reply.message_id)
@@ -353,7 +443,11 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 next_field = fields[next_idx]
                 draft["awaiting"] = next_field["key"]
                 draft["sequential"] = True
-                prompt, markup = _make_field_prompt(next_field, sequential=True)
+                prev_key = key  # current field becomes the "previous" for the next prompt
+                prompt, markup = _make_field_prompt(
+                    next_field, sequential=True,
+                    current_idx=next_idx, total=len(fields), prev_key=prev_key,
+                )
                 sent = await update.message.reply_text(prompt, reply_markup=markup)
                 draft["prompt_msg_id"] = sent.message_id
                 draft["prompt_chat_id"] = update.effective_chat.id
@@ -389,8 +483,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 await update.message.reply_text("❌ 您不是管理员，访问请求已拒绝。")
             return
 
-    if text.startswith("@") or text.startswith("#"):
-        await update.message.reply_text(await query_reports(text))
+    if text.startswith("@"):
+        await _do_query_page(update, context, "a", text[1:], 0)
+        return
+
+    if text.startswith("#"):
+        await _do_query_page(update, context, "h", text, 0)
         return
 
     mapping = {item["text"]: item for item in keyboard_config()}
@@ -410,6 +508,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await write_report_flow(update, context)
     elif action == "search_help":
         await update.message.reply_text(setting_get("search_help_text"))
+    elif action == "my_reports":
+        await my_reports_flow(update, context, page=0)
     elif action == "contact":
         await update.message.reply_text(setting_get("contact_text"))
     elif action == "usage":
@@ -430,6 +530,14 @@ async def submit_report(context: ContextTypes.DEFAULT_TYPE, update: Update) -> N
         missing_labels = "、".join(fields_map.get(k, k) for k in missing)
         await update.effective_chat.send_message(f"以下必填项尚未填写，请继续完善：{missing_labels}")
         return
+
+    # Rate limiting: max 3 reports per hour
+    if is_rate_limited_submission(update.effective_user.id):
+        await update.effective_chat.send_message(
+            "⚠️ 您提交报告过于频繁，请稍后再试（每小时最多 3 条）。"
+        )
+        return
+
     values = draft["values"]
     tag = values.get("tag", "")
     username = update.effective_user.username or ""
@@ -466,9 +574,14 @@ async def submit_report(context: ContextTypes.DEFAULT_TYPE, update: Update) -> N
     if admin_ids:
         preview = render_report_preview(values, template)
         submitter_id = update.effective_user.id
+        link_base = setting_get("report_link_base", "").strip()
+        detail_link = ""
+        if link_base:
+            detail_link = f"\n🔗 <a href='{html.escape(link_base.rstrip('/'))}/reports/{report_id}'>查看报告详情</a>"
         notification = (
             f"📋 新报告待审核 #{report_id}\n"
-            f"用户：@{html.escape(username or '未知')}（ID: {submitter_id}）\n\n"
+            f"用户：@{html.escape(username or '未知')}（ID: {submitter_id}）"
+            f"{detail_link}\n\n"
             f"{preview}"
         )
         review_buttons = InlineKeyboardMarkup(
@@ -595,6 +708,23 @@ async def _push_report_to_channel(bot: Bot, report_id: int, report: dict) -> str
                         "UPDATE reports SET channel_message_link=%s WHERE id=%s",
                         (channel_link, report_id),
                     )
+            # Send photo fields to the channel after the text push (if enabled)
+            if setting_get("push_photos_enabled", "1") == "1":
+                for f in tpl_fields:
+                    if field_types.get(f["key"], "text") == "photo":
+                        photo_file_id = data_values.get(f["key"])
+                        if photo_file_id:
+                            try:
+                                await bot.send_photo(
+                                    chat_id=push_channel,
+                                    photo=photo_file_id,
+                                    caption=f"📷 {html.escape(f['label'])} — 报告 #{report_id}",
+                                )
+                            except Exception:
+                                logger.warning(
+                                    "failed to push photo field %s for report %s to channel %s",
+                                    f["key"], report_id, push_channel, exc_info=True,
+                                )
         except Exception:
             logger.warning("failed to push report %s to channel %s", report_id, push_channel, exc_info=True)
     return first_channel_link
@@ -640,11 +770,19 @@ async def approve_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         logger.exception("approve_cmd: invalid report_id=%s", report_id)
         await update.message.reply_text("报告ID格式无效。")
         return
+    log_audit(update.effective_user.id, "approve", int(report_id))
     await update.message.reply_text(f"报告 #{report_id} 已通过。")
 
     channel_link = await _push_report_to_channel(context.bot, report_id, report)
     feedback = _build_approval_feedback(report_id, channel_link=channel_link)
     await context.bot.send_message(chat_id=report["user_id"], text=feedback)
+
+
+def _build_reject_markup(report_id: int) -> InlineKeyboardMarkup:
+    """Return an inline keyboard with a re-edit button for rejected reports."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📝 重新编辑", callback_data=f"reedit:{report_id}")]
+    ])
 
 
 async def reject_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -670,12 +808,16 @@ async def reject_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         logger.exception("reject_cmd: invalid report_id=%s", report_id)
         await update.message.reply_text("报告ID格式无效。")
         return
+    log_audit(update.effective_user.id, "reject", int(report_id), note=reason)
     tpl = (
         setting_get("review_rejected_template", "").strip()
         or DEFAULT_SETTINGS["review_rejected_template"]
     )
     feedback = safe_format(tpl, id=report_id, reason=reason)
-    await context.bot.send_message(chat_id=report["user_id"], text=feedback)
+    await context.bot.send_message(
+        chat_id=report["user_id"], text=feedback,
+        reply_markup=_build_reject_markup(int(report_id)),
+    )
     await update.message.reply_text(f"报告 #{report_id} 已驳回。")
 
 
@@ -732,6 +874,90 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             schedule_auto_delete(context.bot, sent_fail.chat_id, sent_fail.message_id)
         return
 
+    # ---- My reports pagination ----
+    if data.startswith("mrp:"):
+        await query.answer()
+        try:
+            page = int(data.split(":", 1)[1])
+        except (ValueError, IndexError):
+            page = 0
+        await my_reports_flow(update, context, page=page, edit_message=query.message)
+        return
+
+    # ---- Query results pagination ----
+    if data.startswith("qp:"):
+        await query.answer()
+        # format: qp:PAGE:TYPE:VALUE
+        parts = data.split(":", 3)
+        if len(parts) == 4:
+            try:
+                page = int(parts[1])
+            except ValueError:
+                page = 0
+            query_type = parts[2]
+            query_value = parts[3]
+            await _do_query_page(update, context, query_type, query_value, page, edit_message=query.message)
+        return
+
+    # ---- Re-edit rejected report ----
+    if data.startswith("reedit:"):
+        await query.answer()
+        report_id_str = data.split(":", 1)[1]
+        user_id = update.effective_user.id
+        with db_connection() as conn:
+            report = conn.execute(
+                "SELECT * FROM reports WHERE id = %s AND user_id = %s AND status = 'rejected'",
+                (report_id_str, user_id),
+            ).fetchone()
+        if not report:
+            await query.message.reply_text("报告不存在或无权重新编辑。")
+            return
+        draft = start_report_draft(context)
+        old_values = parse_json(report["data_json"], {})
+        draft["values"] = {k: v for k, v in old_values.items() if isinstance(v, str)}
+        fields = draft["template"]["fields"]
+        if fields:
+            first_field = fields[0]
+            draft["awaiting"] = first_field["key"]
+            draft["sequential"] = True
+            prompt, markup = _make_field_prompt(
+                first_field, sequential=True, current_idx=0, total=len(fields)
+            )
+            sent = await query.message.reply_text(
+                f"📝 重新编辑报告 #{report_id_str}（当前值已预填，直接修改或跳过）\n\n{prompt}",
+                reply_markup=markup,
+            )
+            draft["prompt_msg_id"] = sent.message_id
+            draft["prompt_chat_id"] = query.message.chat_id
+            schedule_auto_delete(context.bot, sent.chat_id, sent.message_id)
+        return
+
+    # ---- Back button in sequential field flow ----
+    if data.startswith("back_field:"):
+        await query.answer()
+        target_key = data.split(":", 1)[1]
+        draft = context.user_data.get("report_draft")
+        if not draft:
+            return
+        fields = draft["template"]["fields"]
+        target_idx = next((i for i, f in enumerate(fields) if f["key"] == target_key), -1)
+        if target_idx < 0:
+            return
+        target_field = fields[target_idx]
+        prev_key = fields[target_idx - 1]["key"] if target_idx > 0 else None
+        draft["awaiting"] = target_key
+        draft["sequential"] = True
+        await _delete_prompt_message(context, draft)
+        prompt, markup = _make_field_prompt(
+            target_field, sequential=True,
+            current_idx=target_idx, total=len(fields), prev_key=prev_key,
+        )
+        sent = await query.message.reply_text(prompt, reply_markup=markup)
+        draft["prompt_msg_id"] = sent.message_id
+        draft["prompt_chat_id"] = query.message.chat_id
+        schedule_auto_delete(context.bot, sent.chat_id, sent.message_id)
+        return
+
     draft = context.user_data.get("report_draft")
 
     if data == "cancel_report":
@@ -775,7 +1001,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             next_field = fields[next_idx]
             draft["awaiting"] = next_field["key"]
             draft["sequential"] = True
-            prompt, markup = _make_field_prompt(next_field, sequential=True)
+            prev_key = key
+            prompt, markup = _make_field_prompt(
+                next_field, sequential=True,
+                current_idx=next_idx, total=len(fields), prev_key=prev_key,
+            )
             sent = await query.message.reply_text(prompt, reply_markup=markup)
             draft["prompt_msg_id"] = sent.message_id
             draft["prompt_chat_id"] = query.message.chat_id
@@ -822,6 +1052,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             logger.exception("approve callback: invalid report_id=%s", report_id)
             await query.answer("无效的报告ID。", show_alert=True)
             return
+        log_audit(update.effective_user.id, "approve", int(report_id))
         await query.answer("已通过。")
         try:
             await query.edit_message_reply_markup(reply_markup=None)
@@ -910,7 +1141,11 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             next_field = fields[next_idx]
             draft["awaiting"] = next_field["key"]
             draft["sequential"] = True
-            prompt, markup = _make_field_prompt(next_field, sequential=True)
+            prev_key = key
+            prompt, markup = _make_field_prompt(
+                next_field, sequential=True,
+                current_idx=next_idx, total=len(fields), prev_key=prev_key,
+            )
             sent = await update.message.reply_text(prompt, reply_markup=markup)
             draft["prompt_msg_id"] = sent.message_id
             draft["prompt_chat_id"] = update.effective_chat.id
@@ -948,6 +1183,63 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"  ✅ 已通过：{approved}\n"
         f"  ❌ 已驳回：{rejected}"
     )
+
+
+_PENDING_REMINDER_INTERVAL = 7200    # 2 hours
+_PENDING_REMINDER_FIRST = 300         # 5 minutes after start
+_AUTO_CLEANUP_INTERVAL = 86400        # 24 hours
+_AUTO_CLEANUP_FIRST = 3600            # 1 hour after start
+
+
+async def _pending_reminder_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Periodic job: notify admins of reports pending for longer than the configured threshold."""
+    try:
+        threshold_hours = int(setting_get("pending_reminder_threshold_hours", "24"))
+    except (ValueError, TypeError):
+        threshold_hours = 24
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=threshold_hours)).isoformat()
+    try:
+        with db_connection() as conn:
+            rows = conn.execute(
+                "SELECT id, username FROM reports WHERE status='pending' AND created_at < %s ORDER BY id DESC",
+                (cutoff,),
+            ).fetchall()
+    except Exception:
+        logger.warning("pending_reminder_job: DB query failed", exc_info=True)
+        return
+    if not rows:
+        return
+    count = len(rows)
+    ids_str = "、".join(f"#{r['id']}" for r in rows[:5])
+    if count > 5:
+        ids_str += f" 等共 {count} 条"
+    msg = (
+        f"⏰ 提醒：有 {count} 条报告待审核超过 {threshold_hours} 小时\n"
+        f"{ids_str}\n\n"
+        f"请前往管理后台或使用 /pending 命令处理。"
+    )
+    for admin_id in get_admin_user_ids():
+        try:
+            await context.bot.send_message(chat_id=admin_id, text=msg)
+        except Exception:
+            logger.warning("pending_reminder_job: failed to notify admin %s", admin_id, exc_info=True)
+
+
+async def _auto_cleanup_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Periodic job: delete rejected reports older than 90 days."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
+    try:
+        with db_connection() as conn:
+            cur = conn.execute(
+                "DELETE FROM reports WHERE status='rejected' AND created_at < %s",
+                (cutoff,),
+            )
+            deleted = cur.rowcount
+    except Exception:
+        logger.warning("auto_cleanup_job: DB error", exc_info=True)
+        return
+    if deleted:
+        logger.info("auto_cleanup_job: deleted %d old rejected reports", deleted)
 
 
 async def ptb_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -990,4 +1282,27 @@ def create_bot_application(token: str) -> Application:
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, on_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+
+    if app.job_queue is not None:
+        # Read the reminder check interval from DB (or env) at startup; default 2 h
+        try:
+            _reminder_interval_hours = int(setting_get("pending_reminder_interval_hours", str(_PENDING_REMINDER_INTERVAL // 3600)))
+        except (ValueError, TypeError):
+            _reminder_interval_hours = _PENDING_REMINDER_INTERVAL // 3600
+        _reminder_interval_hours = max(1, _reminder_interval_hours)
+        reminder_interval_seconds = _reminder_interval_hours * 3600
+        # Remind admins about pending reports (start after 5 min)
+        app.job_queue.run_repeating(
+            _pending_reminder_job, interval=reminder_interval_seconds, first=_PENDING_REMINDER_FIRST
+        )
+        # Clean up old rejected reports once a day (start after 1 hour)
+        app.job_queue.run_repeating(
+            _auto_cleanup_job, interval=_AUTO_CLEANUP_INTERVAL, first=_AUTO_CLEANUP_FIRST
+        )
+    else:
+        logger.warning(
+            "APScheduler not available — periodic jobs disabled. "
+            "Install apscheduler to enable pending reminders and auto-cleanup."
+        )
+
     return app
