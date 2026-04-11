@@ -6,6 +6,10 @@ from app.crud import setting_get
 from app.keyboards import report_template
 from app.utils import parse_json
 
+# Tabs that are only shown to the main admin; child-bot sub-admins cannot see these.
+_MAIN_ADMIN_ONLY_TABS = frozenset(
+    {"basic", "welcome", "keyboard", "template", "texts", "review", "broadcast", "child-bots"}
+)
 
 def report_to_html(report_row: dict) -> str:
     data = parse_json(report_row["data_json"], {})
@@ -753,7 +757,7 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
     # The first active nav tab differs for child vs main admin
     _first_tab = "pending" if is_child_admin else "basic"
     # Override initial_tab to a visible tab for child admins
-    if is_child_admin and initial_tab in ("basic", "welcome", "keyboard", "template", "texts", "review", "broadcast", "child-bots"):
+    if is_child_admin and initial_tab in _MAIN_ADMIN_ONLY_TABS:
         initial_tab = "pending"
 
     # Build stats bar

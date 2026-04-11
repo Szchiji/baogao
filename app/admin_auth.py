@@ -31,7 +31,13 @@ def _cleanup_verify_state() -> None:
             _verify_code_otps.pop(k, None)
     for k in list(_otp_tokens):
         entry = _otp_tokens.get(k)
-        expiry = entry["expiry"] if isinstance(entry, dict) else (entry or now + 1)
+        if isinstance(entry, dict):
+            expiry = entry["expiry"]
+        elif isinstance(entry, (int, float)):
+            # Backward-compatible: old format stored a raw float expiry timestamp.
+            expiry = float(entry)
+        else:
+            expiry = now  # Unknown format: treat as expired and remove.
         if expiry < now:
             _otp_tokens.pop(k, None)
     for k in list(_child_session_expiry):

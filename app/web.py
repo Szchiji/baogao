@@ -500,11 +500,12 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
         if not token or token not in _otp_tokens:
             return HTMLResponse(_error_page("链接无效或已过期，请重新获取验证码。"), status_code=403)
         token_data = _otp_tokens.get(token)
-        expiry = token_data["expiry"] if isinstance(token_data, dict) else token_data
+        is_dict_format = isinstance(token_data, dict)
+        expiry = token_data["expiry"] if is_dict_format else token_data
         if time.time() > expiry:
             _otp_tokens.pop(token, None)
             return HTMLResponse(_error_page("登录链接已过期，请重新获取验证码。"), status_code=403)
-        owner_user_id: int | None = token_data.get("owner_user_id") if isinstance(token_data, dict) else None
+        owner_user_id: int | None = token_data.get("owner_user_id") if is_dict_format else None
         # Consume the token
         _otp_tokens.pop(token, None)
         if not config.admin_panel_token:
