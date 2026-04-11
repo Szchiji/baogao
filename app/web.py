@@ -646,7 +646,7 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
             )
         log_audit(0, "web_approve", int(report_id))
         # Use the child bot's Telegram Bot object when approving for a child bot.
-        tg_bot = (bot_manager.get_bot_by_bot_id(bot_id) if bot_id else None) or web.state.tg_application.bot
+        tg_bot = bot_manager.get_bot_by_bot_id(bot_id) or web.state.tg_application.bot
         try:
             channel_link = await _push_report_to_channel(tg_bot, report_id, report, bot_id=bot_id)
         except Exception:
@@ -676,7 +676,7 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
                 (reason.strip() or "请联系管理员", utc_now_iso(), report_id),
             )
         log_audit(0, "web_reject", int(report_id), note=reason.strip())
-        tg_bot = (bot_manager.get_bot_by_bot_id(bot_id) if bot_id else None) or web.state.tg_application.bot
+        tg_bot = bot_manager.get_bot_by_bot_id(bot_id) or web.state.tg_application.bot
         tpl = (
             setting_get("review_rejected_template", "", bot_id=bot_id).strip()
             or DEFAULT_SETTINGS["review_rejected_template"]
@@ -698,7 +698,7 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
             return redirect
         from app import bot_manager
         bot_id = _get_request_bot_id(request)
-        tg_bot = (bot_manager.get_bot_by_bot_id(bot_id) if bot_id else None) or web.state.tg_application.bot
+        tg_bot = bot_manager.get_bot_by_bot_id(bot_id) or web.state.tg_application.bot
         id_list = [i.strip() for i in ids.split(",") if i.strip().isdigit()]
         for report_id in id_list:
             try:

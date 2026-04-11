@@ -67,27 +67,21 @@ def init_db() -> None:
             )
             """
         )
-        # Migration: older deployments had a single-column PK on key.
-        # Add bot_id column and re-create the PK if the old schema is detected.
+        # Migration: older deployments had a single-column PK on key only.
+        # Add bot_id column if missing, then upgrade the PK when needed.
         conn.execute(
             "ALTER TABLE settings ADD COLUMN IF NOT EXISTS bot_id TEXT NOT NULL DEFAULT ''"
         )
         conn.execute(
             """
             DO $$ BEGIN
+              -- Drop the old single-column PK when bot_id is not yet part of it.
               IF EXISTS (
-                SELECT 1 FROM pg_constraint
-                WHERE conname = 'settings_pkey'
-                  AND contype = 'p'
-                  AND conrelid = 'settings'::regclass
-              ) AND NOT EXISTS (
-                SELECT 1 FROM pg_attribute
-                WHERE attrelid = 'settings'::regclass
-                  AND attname = 'bot_id'
-                  AND attnum = ANY(
-                    SELECT unnest(conkey) FROM pg_constraint
-                    WHERE conname = 'settings_pkey' AND conrelid = 'settings'::regclass
-                  )
+                SELECT 1 FROM pg_constraint c
+                WHERE c.conname = 'settings_pkey'
+                  AND c.contype = 'p'
+                  AND c.conrelid = 'settings'::regclass
+                  AND array_length(c.conkey, 1) = 1
               ) THEN
                 ALTER TABLE settings DROP CONSTRAINT settings_pkey;
                 ALTER TABLE settings ADD PRIMARY KEY (bot_id, key);
@@ -149,18 +143,11 @@ def init_db() -> None:
             """
             DO $$ BEGIN
               IF EXISTS (
-                SELECT 1 FROM pg_constraint
-                WHERE conname = 'users_pkey'
-                  AND contype = 'p'
-                  AND conrelid = 'users'::regclass
-              ) AND NOT EXISTS (
-                SELECT 1 FROM pg_attribute
-                WHERE attrelid = 'users'::regclass
-                  AND attname = 'bot_id'
-                  AND attnum = ANY(
-                    SELECT unnest(conkey) FROM pg_constraint
-                    WHERE conname = 'users_pkey' AND conrelid = 'users'::regclass
-                  )
+                SELECT 1 FROM pg_constraint c
+                WHERE c.conname = 'users_pkey'
+                  AND c.contype = 'p'
+                  AND c.conrelid = 'users'::regclass
+                  AND array_length(c.conkey, 1) = 1
               ) THEN
                 ALTER TABLE users DROP CONSTRAINT users_pkey;
                 ALTER TABLE users ADD PRIMARY KEY (bot_id, user_id);
@@ -189,18 +176,11 @@ def init_db() -> None:
             """
             DO $$ BEGIN
               IF EXISTS (
-                SELECT 1 FROM pg_constraint
-                WHERE conname = 'blacklist_pkey'
-                  AND contype = 'p'
-                  AND conrelid = 'blacklist'::regclass
-              ) AND NOT EXISTS (
-                SELECT 1 FROM pg_attribute
-                WHERE attrelid = 'blacklist'::regclass
-                  AND attname = 'bot_id'
-                  AND attnum = ANY(
-                    SELECT unnest(conkey) FROM pg_constraint
-                    WHERE conname = 'blacklist_pkey' AND conrelid = 'blacklist'::regclass
-                  )
+                SELECT 1 FROM pg_constraint c
+                WHERE c.conname = 'blacklist_pkey'
+                  AND c.contype = 'p'
+                  AND c.conrelid = 'blacklist'::regclass
+                  AND array_length(c.conkey, 1) = 1
               ) THEN
                 ALTER TABLE blacklist DROP CONSTRAINT blacklist_pkey;
                 ALTER TABLE blacklist ADD PRIMARY KEY (bot_id, user_id);

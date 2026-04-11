@@ -75,6 +75,7 @@ def _get_bot_id(context: ContextTypes.DEFAULT_TYPE) -> str:
 
 
 
+def _get_bot_admin_ids(context: ContextTypes.DEFAULT_TYPE) -> list[int]:
     """Return the effective admin user IDs for the current bot instance.
 
     For child bots the ``bot_data["child_admin_id"]`` is the sole admin (the
