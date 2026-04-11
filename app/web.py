@@ -753,11 +753,13 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
         if not token:
             raise HTTPException(status_code=400, detail="token is required")
         # Validate token by fetching bot info from Telegram.
+        bot_username = ""
+        bot_name = ""
         try:
-            bot = Bot(token=token)
-            me = await bot.get_me()
-            bot_username = me.username or ""
-            bot_name = me.full_name or ""
+            async with Bot(token=token) as validation_bot:
+                me = await validation_bot.get_me()
+                bot_username = me.username or ""
+                bot_name = me.full_name or ""
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"无效的 Bot Token：{exc}") from exc
         try:

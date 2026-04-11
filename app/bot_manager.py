@@ -60,7 +60,7 @@ async def start_child_bot(token: str) -> bool:
         return False
 
     app = create_bot_application(token)
-    task = asyncio.get_event_loop().create_task(_poll_child(app))
+    task = asyncio.create_task(_poll_child(app))
 
     def _on_done(t: "asyncio.Task[None]") -> None:
         _running.pop(token, None)
