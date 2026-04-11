@@ -19,8 +19,8 @@ from app.utils import parse_json
 logger = logging.getLogger("report-bot")
 
 
-def keyboard_config() -> list[dict[str, str]]:
-    items = parse_json(setting_get("keyboard_buttons_json"), [])
+def keyboard_config(bot_id: str = "") -> list[dict[str, str]]:
+    items = parse_json(setting_get("keyboard_buttons_json", bot_id=bot_id), [])
     normalized: list[dict[str, str]] = []
     for item in items:
         if isinstance(item, str):
@@ -38,8 +38,8 @@ def keyboard_config() -> list[dict[str, str]]:
     return normalized
 
 
-def report_template() -> dict[str, Any]:
-    data = parse_json(setting_get("report_template_json"), {})
+def report_template(bot_id: str = "") -> dict[str, Any]:
+    data = parse_json(setting_get("report_template_json", bot_id=bot_id), {})
     if not isinstance(data, dict):
         return {"name": "模板", "fields": []}
     fields = data.get("fields", [])
@@ -91,25 +91,25 @@ def _make_field_prompt(
     return prompt, InlineKeyboardMarkup(buttons)
 
 
-def get_force_sub_channels() -> list[str]:
+def get_force_sub_channels(bot_id: str = "") -> list[str]:
     """Return the list of configured force-subscribe channel IDs / usernames."""
-    raw = setting_get("force_sub_channel", "").strip()
+    raw = setting_get("force_sub_channel", "", bot_id=bot_id).strip()
     if not raw:
         return []
     return [c.strip() for c in raw.split(",") if c.strip()]
 
 
-def get_push_channels() -> list[str]:
+def get_push_channels(bot_id: str = "") -> list[str]:
     """Return the list of configured push channel IDs / usernames."""
-    raw = setting_get("push_channel", "").strip()
+    raw = setting_get("push_channel", "", bot_id=bot_id).strip()
     if not raw:
         return []
     return [c.strip() for c in raw.split(",") if c.strip()]
 
 
-async def is_subscribed(bot: Bot, user_id: int) -> bool:
+async def is_subscribed(bot: Bot, user_id: int, bot_id: str = "") -> bool:
     """Return True only when the user is subscribed to ALL force-subscribe channels."""
-    channels = get_force_sub_channels()
+    channels = get_force_sub_channels(bot_id=bot_id)
     if not channels:
         return True
     for channel in channels:
@@ -124,8 +124,8 @@ async def is_subscribed(bot: Bot, user_id: int) -> bool:
     return True
 
 
-def start_keyboard() -> ReplyKeyboardMarkup:
-    items = keyboard_config()
+def start_keyboard(bot_id: str = "") -> ReplyKeyboardMarkup:
+    items = keyboard_config(bot_id=bot_id)
     if not items:
         return ReplyKeyboardMarkup(
             [[KeyboardButton("写报告")], [KeyboardButton("查阅报告")]], resize_keyboard=True
@@ -186,8 +186,8 @@ def _normalize_admin_url(base_url: str) -> str:
     return f"{base}/admin"
 
 
-def start_inline_buttons(user_id: int | None = None, admin_panel_url: str | None = None) -> InlineKeyboardMarkup | None:
-    raw_buttons = parse_json(setting_get("start_buttons_json"), [])
+def start_inline_buttons(user_id: int | None = None, admin_panel_url: str | None = None, bot_id: str = "") -> InlineKeyboardMarkup | None:
+    raw_buttons = parse_json(setting_get("start_buttons_json", bot_id=bot_id), [])
     is_admin = user_id is not None and is_user_admin(user_id)
     if admin_panel_url is None:
         admin_panel_url = os.getenv("ADMIN_PANEL_URL", "").strip()

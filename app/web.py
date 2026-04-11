@@ -24,12 +24,13 @@ from app.admin_auth import (
     _VERIFY_CODE_TTL,
     create_child_admin_session,
     get_child_admin_id,
+    get_child_session_info,
 )
 from app.admin_panel import build_admin_html, report_to_html
 from app.bot_handlers import _build_approval_feedback, _build_reject_markup, _push_report_to_channel
 from app.config import AppConfig, DEFAULT_SETTINGS
 from app.crud import ban_user, log_audit, setting_get, setting_set, unban_user, add_child_bot, remove_child_bot, list_child_bots, set_child_bot_active
-from app.database import db_connection
+from app.database import db_connection, init_bot_settings
 from app.utils import parse_json, safe_format, utc_now_iso
 
 logger = logging.getLogger("report-bot")
@@ -193,10 +194,24 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
 
     def _get_request_child_admin_id(request: Request) -> int | None:
         """Return the owner_user_id if the request carries a valid child-admin session."""
+        info = _get_request_child_session_info(request)
+        return info["owner_user_id"] if info else None
+
+    def _get_request_child_session_info(request: Request) -> dict | None:
+        """Return {"owner_user_id": int, "bot_id": str} for a valid child-admin session, or None."""
         session = request.cookies.get("admin_child_session", "")
         if not session:
             return None
-        return get_child_admin_id(session)
+        return get_child_session_info(session)
+
+    def _get_request_bot_id(request: Request) -> str:
+        """Return the bot_id scoped to the current request's session.
+
+        Main admins always operate on the main bot (bot_id='').
+        Child admins operate on their own child bot's partition.
+        """
+        info = _get_request_child_session_info(request)
+        return info["bot_id"] if info else ""
 
     def _auth(request: Request) -> RedirectResponse | None:
         if not config.admin_panel_token:
@@ -208,7 +223,7 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
         if query_token == config.admin_panel_token:
             return None
         # Child-bot sub-admins log in with a restricted session cookie instead.
-        if _get_request_child_admin_id(request) is not None:
+        if _get_request_child_session_info(request) is not None:
             return None
         return RedirectResponse(url="/admin/login", status_code=303)
 
@@ -295,22 +310,27 @@ input[type=password]:focus{outline:none;border-color:#4f46e5;box-shadow:0 0 0 3p
             return redirect
         child_admin_id = _get_request_child_admin_id(request)
         is_child_admin = child_admin_id is not None
+        bot_id = _get_request_bot_id(request)
         should_set_cookie = _should_set_admin_cookie(request)
         saved = request.query_params.get("saved") == "1"
         with db_connection() as conn:
-            rows = conn.execute("SELECT key, value FROM settings").fetchall()
+            rows = conn.execute("SELECT key, value FROM settings WHERE bot_id = %s", (bot_id,)).fetchall()
             pending_rows = conn.execute(
-                "SELECT id, username, created_at, data_json FROM reports WHERE status = 'pending' ORDER BY id DESC LIMIT 50"
+                "SELECT id, username, created_at, data_json FROM reports WHERE bot_id = %s AND status = 'pending' ORDER BY id DESC LIMIT 50",
+                (bot_id,),
             ).fetchall()
-            user_count_row = conn.execute("SELECT COUNT(*) as cnt FROM users").fetchone()
+            user_count_row = conn.execute("SELECT COUNT(*) as cnt FROM users WHERE bot_id = %s", (bot_id,)).fetchone()
             blacklist_rows = conn.execute(
-                "SELECT user_id, username, reason, added_at FROM blacklist ORDER BY added_at DESC"
+                "SELECT user_id, username, reason, added_at FROM blacklist WHERE bot_id = %s ORDER BY added_at DESC",
+                (bot_id,),
             ).fetchall()
             all_report_rows = conn.execute(
-                "SELECT id, username, created_at, status, data_json, review_feedback, channel_message_link FROM reports ORDER BY id DESC LIMIT 200"
+                "SELECT id, username, created_at, status, data_json, review_feedback, channel_message_link FROM reports WHERE bot_id = %s ORDER BY id DESC LIMIT 200",
+                (bot_id,),
             ).fetchall()
             report_stats = conn.execute(
-                "SELECT status, COUNT(*) as cnt FROM reports GROUP BY status"
+                "SELECT status, COUNT(*) as cnt FROM reports WHERE bot_id = %s GROUP BY status",
+                (bot_id,),
             ).fetchall()
         settings_map = {r["key"]: r["value"] for r in rows}
         pending_list = [dict(r) for r in pending_rows]
@@ -364,8 +384,7 @@ input[type=password]:focus{outline:none;border-color:#4f46e5;box-shadow:0 0 0 3p
     ):
         if redirect := _auth(request):
             return redirect
-        if not _is_main_admin(request):
-            raise HTTPException(status_code=403, detail="子管理员无权修改系统设置")
+        bot_id = _get_request_bot_id(request)
         try:
             start_buttons_obj = json.loads(start_buttons_json)
             keyboard_buttons_obj = json.loads(keyboard_buttons_json)
@@ -408,15 +427,16 @@ input[type=password]:focus{outline:none;border-color:#4f46e5;box-shadow:0 0 0 3p
             "report_link_base": report_link_base.strip(),
         }
         for key, value in updates.items():
-            setting_set(key, value)
+            setting_set(key, value, bot_id=bot_id)
         return RedirectResponse(url="/admin?saved=1", status_code=303)
 
     @web.get("/admin/settings")
     async def admin_settings(request: Request):
         if redirect := _auth(request):
             return redirect
+        bot_id = _get_request_bot_id(request)
         with db_connection() as conn:
-            rows = conn.execute("SELECT key, value FROM settings").fetchall()
+            rows = conn.execute("SELECT key, value FROM settings WHERE bot_id = %s", (bot_id,)).fetchall()
         return {r["key"]: r["value"] for r in rows}
 
     # ---- Admin verification flow ----
@@ -506,6 +526,7 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
             _otp_tokens.pop(token, None)
             return HTMLResponse(_error_page("登录链接已过期，请重新获取验证码。"), status_code=403)
         owner_user_id: int | None = token_data.get("owner_user_id") if is_dict_format else None
+        token_bot_id: str = (token_data.get("bot_id") or "") if is_dict_format else ""
         # Consume the token
         _otp_tokens.pop(token, None)
         if not config.admin_panel_token:
@@ -530,7 +551,7 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
         if owner_user_id is not None:
             # Child-bot sub-admin: issue a restricted session cookie instead of
             # the full admin_panel_token cookie so the panel can show a limited view.
-            session_token = create_child_admin_session(owner_user_id)
+            session_token = create_child_admin_session(owner_user_id, bot_id=token_bot_id)
             response.set_cookie(
                 key="admin_child_session",
                 value=session_token,
@@ -558,14 +579,16 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
             uid = int(user_id.strip())
         except (ValueError, AttributeError):
             raise HTTPException(status_code=400, detail="用户ID必须是数字")
-        ban_user(uid, None, reason.strip() or "管理员限制")
+        bot_id = _get_request_bot_id(request)
+        ban_user(uid, None, reason.strip() or "管理员限制", bot_id=bot_id)
         return RedirectResponse(url="/admin#tab=blacklist", status_code=303)
 
     @web.post("/admin/blacklist/unban/{user_id}")
     async def web_blacklist_unban(user_id: int, request: Request):
         if redirect := _auth(request):
             return redirect
-        unban_user(user_id)
+        bot_id = _get_request_bot_id(request)
+        unban_user(user_id, bot_id=bot_id)
         return RedirectResponse(url="/admin#tab=blacklist", status_code=303)
 
     # ---- Settings export / import ----
@@ -574,8 +597,9 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
     async def admin_export_settings(request: Request):
         if redirect := _auth(request):
             return redirect
+        bot_id = _get_request_bot_id(request)
         with db_connection() as conn:
-            rows = conn.execute("SELECT key, value FROM settings").fetchall()
+            rows = conn.execute("SELECT key, value FROM settings WHERE bot_id = %s", (bot_id,)).fetchall()
         data = {r["key"]: r["value"] for r in rows}
         content = json.dumps(data, ensure_ascii=False, indent=2)
         return Response(
@@ -588,8 +612,8 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
     async def admin_import_settings(request: Request, settings_json: str = Form("")):
         if redirect := _auth(request):
             return redirect
-        if not _is_main_admin(request):
-            raise HTTPException(status_code=403, detail="子管理员无权导入系统设置")
+        bot_id = _get_request_bot_id(request)
+        # Main admin can import for main bot; child admin can only import for own bot.
         try:
             data = json.loads(settings_json)
         except json.JSONDecodeError:
@@ -600,7 +624,7 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
         imported = 0
         for key, value in data.items():
             if key in allowed_keys and isinstance(value, str):
-                setting_set(key, value)
+                setting_set(key, value, bot_id=bot_id)
                 imported += 1
         return RedirectResponse(url="/admin?saved=1", status_code=303)
 
@@ -608,8 +632,10 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
     async def web_approve_report(report_id: str, request: Request):
         if redirect := _auth(request):
             return redirect
+        from app import bot_manager
+        bot_id = _get_request_bot_id(request)
         with db_connection() as conn:
-            report = conn.execute("SELECT * FROM reports WHERE id = %s", (report_id,)).fetchone()
+            report = conn.execute("SELECT * FROM reports WHERE id = %s AND bot_id = %s", (report_id, bot_id)).fetchone()
             if not report:
                 raise HTTPException(status_code=404, detail="报告不存在")
             if report["status"] != "pending":
@@ -619,14 +645,16 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
                 (utc_now_iso(), report_id),
             )
         log_audit(0, "web_approve", int(report_id))
+        # Use the child bot's Telegram Bot object when approving for a child bot.
+        tg_bot = bot_manager.get_bot_by_bot_id(bot_id) or web.state.tg_application.bot
         try:
-            channel_link = await _push_report_to_channel(web.state.tg_application.bot, report_id, report)
+            channel_link = await _push_report_to_channel(tg_bot, report_id, report, bot_id=bot_id)
         except Exception:
             logger.warning("failed to push report %s to channel", report_id, exc_info=True)
             channel_link = ""
-        feedback = _build_approval_feedback(report_id, channel_link=channel_link)
+        feedback = _build_approval_feedback(report_id, channel_link=channel_link, bot_id=bot_id)
         try:
-            await web.state.tg_application.bot.send_message(chat_id=report["user_id"], text=feedback)
+            await tg_bot.send_message(chat_id=report["user_id"], text=feedback)
         except Exception:
             logger.warning("failed to notify user %s of approval", report["user_id"], exc_info=True)
         return RedirectResponse(url="/admin?tab=pending", status_code=303)
@@ -635,8 +663,10 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
     async def web_reject_report(report_id: str, request: Request, reason: str = Form(default="请联系管理员")):
         if redirect := _auth(request):
             return redirect
+        from app import bot_manager
+        bot_id = _get_request_bot_id(request)
         with db_connection() as conn:
-            report = conn.execute("SELECT * FROM reports WHERE id = %s", (report_id,)).fetchone()
+            report = conn.execute("SELECT * FROM reports WHERE id = %s AND bot_id = %s", (report_id, bot_id)).fetchone()
             if not report:
                 raise HTTPException(status_code=404, detail="报告不存在")
             if report["status"] != "pending":
@@ -646,13 +676,14 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
                 (reason.strip() or "请联系管理员", utc_now_iso(), report_id),
             )
         log_audit(0, "web_reject", int(report_id), note=reason.strip())
+        tg_bot = bot_manager.get_bot_by_bot_id(bot_id) or web.state.tg_application.bot
         tpl = (
-            setting_get("review_rejected_template", "").strip()
+            setting_get("review_rejected_template", "", bot_id=bot_id).strip()
             or DEFAULT_SETTINGS["review_rejected_template"]
         )
         feedback = safe_format(tpl, id=report_id, reason=reason.strip() or "请联系管理员")
         try:
-            await web.state.tg_application.bot.send_message(
+            await tg_bot.send_message(
                 chat_id=report["user_id"], text=feedback,
                 reply_markup=_build_reject_markup(int(report_id)),
             )
@@ -665,12 +696,15 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
         """Approve all specified pending report IDs in one go."""
         if redirect := _auth(request):
             return redirect
+        from app import bot_manager
+        bot_id = _get_request_bot_id(request)
+        tg_bot = bot_manager.get_bot_by_bot_id(bot_id) or web.state.tg_application.bot
         id_list = [i.strip() for i in ids.split(",") if i.strip().isdigit()]
         for report_id in id_list:
             try:
                 with db_connection() as conn:
                     report = conn.execute(
-                        "SELECT * FROM reports WHERE id = %s AND status = 'pending'", (report_id,)
+                        "SELECT * FROM reports WHERE id = %s AND bot_id = %s AND status = 'pending'", (report_id, bot_id)
                     ).fetchone()
                     if not report:
                         continue
@@ -681,14 +715,14 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
                 log_audit(0, "web_batch_approve", int(report_id))
                 try:
                     channel_link = await _push_report_to_channel(
-                        web.state.tg_application.bot, report_id, report
+                        tg_bot, report_id, report, bot_id=bot_id
                     )
                 except Exception:
                     logger.warning("batch approve: push failed for report %s", report_id, exc_info=True)
                     channel_link = ""
-                feedback = _build_approval_feedback(report_id, channel_link=channel_link)
+                feedback = _build_approval_feedback(report_id, channel_link=channel_link, bot_id=bot_id)
                 try:
-                    await web.state.tg_application.bot.send_message(
+                    await tg_bot.send_message(
                         chat_id=report["user_id"], text=feedback
                     )
                 except Exception:
@@ -704,13 +738,15 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
         """Export all reports as a CSV file."""
         if redirect := _auth(request):
             return redirect
+        bot_id = _get_request_bot_id(request)
         with db_connection() as conn:
             rows = conn.execute(
                 """
                 SELECT id, user_id, username, tag, data_json, status,
                        review_feedback, created_at, reviewed_at
-                FROM reports ORDER BY id DESC
-                """
+                FROM reports WHERE bot_id = %s ORDER BY id DESC
+                """,
+                (bot_id,),
             ).fetchall()
         output = io.StringIO()
         writer = csv.writer(output)
@@ -742,8 +778,9 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
             return redirect
         if not _is_main_admin(request):
             raise HTTPException(status_code=403, detail="子管理员无权执行广播操作")
+        bot_id = _get_request_bot_id(request)
         with db_connection() as conn:
-            user_rows = conn.execute("SELECT user_id FROM users").fetchall()
+            user_rows = conn.execute("SELECT user_id FROM users WHERE bot_id = %s", (bot_id,)).fetchall()
         user_ids = [r["user_id"] for r in user_rows]
         buttons_obj = parse_json(broadcast_buttons_json, [])
         markup: InlineKeyboardMarkup | None = None
@@ -816,12 +853,15 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"无效的 Bot Token：{exc}") from exc
         try:
-            add_child_bot(token, bot_username=bot_username, bot_name=bot_name, owner_user_id=owner_user_id, admin_panel_url=admin_panel_url)
+            new_bot_id = add_child_bot(token, bot_username=bot_username, bot_name=bot_name, owner_user_id=owner_user_id, admin_panel_url=admin_panel_url)
         except Exception as exc:
             raise HTTPException(status_code=409, detail=f"该 Token 已存在：{exc}") from exc
+        # Seed default settings for this new child bot.
+        child_bot_id_str = str(new_bot_id)
+        init_bot_settings(child_bot_id_str)
         # Start immediately if the event loop is running.
         try:
-            await bot_manager.start_child_bot(token, owner_user_id=owner_user_id, admin_panel_url=admin_panel_url)
+            await bot_manager.start_child_bot(token, owner_user_id=owner_user_id, admin_panel_url=admin_panel_url, bot_id=child_bot_id_str)
         except Exception:
             logger.exception("child_bot_add: failed to start child bot @%s", bot_username)
         logger.info("admin: child bot added @%s (owner=%s)", bot_username, owner_user_id)
@@ -870,9 +910,10 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
         token = cb["token"]
         owner_user_id = cb.get("owner_user_id")
         admin_panel_url = cb.get("admin_panel_url") or ""
+        child_bot_id_str = str(cb["id"])
         set_child_bot_active(token, active)
         if active:
-            await bot_manager.start_child_bot(token, owner_user_id=owner_user_id, admin_panel_url=admin_panel_url)
+            await bot_manager.start_child_bot(token, owner_user_id=owner_user_id, admin_panel_url=admin_panel_url, bot_id=child_bot_id_str)
         else:
             await bot_manager.stop_child_bot(token)
         return JSONResponse({"ok": True, "active": active})

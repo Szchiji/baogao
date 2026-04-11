@@ -8,6 +8,8 @@ import psycopg2.extras
 
 from app.config import DEFAULT_SETTINGS
 
+__all__ = ["db_connection", "init_db", "init_bot_settings"]
+
 logger = logging.getLogger("report-bot")
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
@@ -52,18 +54,48 @@ def db_connection():
 
 def init_db() -> None:
     with db_connection() as conn:
+        # --- settings ---
+        # New schema uses a composite PK (bot_id, key) for per-bot isolation.
+        # bot_id = '' for the main bot; str(child_bot.id) for each child bot.
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS settings (
-              key TEXT PRIMARY KEY,
-              value TEXT NOT NULL
+              bot_id TEXT NOT NULL DEFAULT '',
+              key TEXT NOT NULL,
+              value TEXT NOT NULL,
+              PRIMARY KEY (bot_id, key)
             )
             """
         )
+        # Migration: older deployments had a single-column PK on key only.
+        # Add bot_id column if missing, then upgrade the PK when needed.
+        conn.execute(
+            "ALTER TABLE settings ADD COLUMN IF NOT EXISTS bot_id TEXT NOT NULL DEFAULT ''"
+        )
+        conn.execute(
+            """
+            DO $$ BEGIN
+              -- Drop the old single-column PK when bot_id is not yet part of it.
+              IF EXISTS (
+                SELECT 1 FROM pg_constraint c
+                WHERE c.conname = 'settings_pkey'
+                  AND c.contype = 'p'
+                  AND c.conrelid = 'settings'::regclass
+                  AND array_length(c.conkey, 1) = 1
+              ) THEN
+                ALTER TABLE settings DROP CONSTRAINT settings_pkey;
+                ALTER TABLE settings ADD PRIMARY KEY (bot_id, key);
+              END IF;
+            END $$
+            """
+        )
+
+        # --- reports ---
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS reports (
               id SERIAL PRIMARY KEY,
+              bot_id TEXT NOT NULL DEFAULT '',
               user_id BIGINT NOT NULL,
               username TEXT,
               tag TEXT,
@@ -77,30 +109,87 @@ def init_db() -> None:
             """
         )
         conn.execute(
+            "ALTER TABLE reports ADD COLUMN IF NOT EXISTS bot_id TEXT NOT NULL DEFAULT ''"
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_reports_bot_status ON reports(bot_id, status, id DESC)
+            """
+        )
+        # Keep old index for backward compatibility during transition
+        conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status, id DESC)
             """
         )
+
+        # --- users ---
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
-              user_id BIGINT PRIMARY KEY,
+              bot_id TEXT NOT NULL DEFAULT '',
+              user_id BIGINT NOT NULL,
               username TEXT,
               first_seen TEXT NOT NULL,
-              last_seen TEXT NOT NULL
+              last_seen TEXT NOT NULL,
+              PRIMARY KEY (bot_id, user_id)
             )
             """
         )
         conn.execute(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS bot_id TEXT NOT NULL DEFAULT ''"
+        )
+        conn.execute(
+            """
+            DO $$ BEGIN
+              IF EXISTS (
+                SELECT 1 FROM pg_constraint c
+                WHERE c.conname = 'users_pkey'
+                  AND c.contype = 'p'
+                  AND c.conrelid = 'users'::regclass
+                  AND array_length(c.conkey, 1) = 1
+              ) THEN
+                ALTER TABLE users DROP CONSTRAINT users_pkey;
+                ALTER TABLE users ADD PRIMARY KEY (bot_id, user_id);
+              END IF;
+            END $$
+            """
+        )
+
+        # --- blacklist ---
+        conn.execute(
             """
             CREATE TABLE IF NOT EXISTS blacklist (
-              user_id BIGINT PRIMARY KEY,
+              bot_id TEXT NOT NULL DEFAULT '',
+              user_id BIGINT NOT NULL,
               username TEXT,
               reason TEXT,
-              added_at TEXT NOT NULL
+              added_at TEXT NOT NULL,
+              PRIMARY KEY (bot_id, user_id)
             )
             """
         )
+        conn.execute(
+            "ALTER TABLE blacklist ADD COLUMN IF NOT EXISTS bot_id TEXT NOT NULL DEFAULT ''"
+        )
+        conn.execute(
+            """
+            DO $$ BEGIN
+              IF EXISTS (
+                SELECT 1 FROM pg_constraint c
+                WHERE c.conname = 'blacklist_pkey'
+                  AND c.contype = 'p'
+                  AND c.conrelid = 'blacklist'::regclass
+                  AND array_length(c.conkey, 1) = 1
+              ) THEN
+                ALTER TABLE blacklist DROP CONSTRAINT blacklist_pkey;
+                ALTER TABLE blacklist ADD PRIMARY KEY (bot_id, user_id);
+              END IF;
+            END $$
+            """
+        )
+
+        # --- audit_log (shared, not isolated per-bot) ---
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS audit_log (
@@ -113,6 +202,8 @@ def init_db() -> None:
             )
             """
         )
+
+        # --- child_bots ---
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS child_bots (
@@ -127,14 +218,25 @@ def init_db() -> None:
             )
             """
         )
-        # Migration: add admin_panel_url column if it was created without it.
         conn.execute(
             "ALTER TABLE child_bots ADD COLUMN IF NOT EXISTS admin_panel_url TEXT"
         )
-        # Insert default settings only if they don't already exist, so existing
-        # configured values are never overwritten on restart/redeploy.
+
+        # Insert default settings for the main bot (bot_id='') only if absent.
         for key, value in DEFAULT_SETTINGS.items():
             conn.execute(
-                "INSERT INTO settings (key, value) VALUES (%s, %s) ON CONFLICT (key) DO NOTHING",
+                "INSERT INTO settings (bot_id, key, value) VALUES ('', %s, %s) ON CONFLICT (bot_id, key) DO NOTHING",
                 (key, value),
+            )
+
+
+def init_bot_settings(bot_id: str) -> None:
+    """Seed all DEFAULT_SETTINGS rows for a new child bot (bot_id must be non-empty)."""
+    if not bot_id:
+        return
+    with db_connection() as conn:
+        for key, value in DEFAULT_SETTINGS.items():
+            conn.execute(
+                "INSERT INTO settings (bot_id, key, value) VALUES (%s, %s, %s) ON CONFLICT (bot_id, key) DO NOTHING",
+                (bot_id, key, value),
             )

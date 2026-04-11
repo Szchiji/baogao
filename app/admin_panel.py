@@ -13,7 +13,8 @@ _MAIN_ADMIN_ONLY_TABS = frozenset(
 
 def report_to_html(report_row: dict) -> str:
     data = parse_json(report_row["data_json"], {})
-    tpl = report_template()
+    bot_id = report_row.get("bot_id", "")
+    tpl = report_template(bot_id=bot_id)
     field_labels = {f["key"]: f["label"] for f in tpl.get("fields", [])}
     field_types = {f["key"]: f.get("type", "text") for f in tpl.get("fields", [])}
 

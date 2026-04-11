@@ -1,12 +1,13 @@
 """Manages dynamically started child bot Application instances.
 
 Each child bot runs in polling mode inside the same asyncio event loop as the
-main application.  Child bots share the same database (and therefore settings,
-users, reports, etc.) and use exactly the same handler set as the main bot.
+main application.  Child bots are fully isolated: each has its own settings,
+users, reports, and blacklist in the database, partitioned by bot_id.
 """
 import asyncio
 import logging
 
+from telegram import Bot
 from telegram.ext import Application
 
 from app.bot_handlers import create_bot_application
@@ -49,7 +50,7 @@ async def _poll_child(app: Application) -> None:
                 pass
 
 
-async def start_child_bot(token: str, owner_user_id: int | None = None, admin_panel_url: str = "") -> bool:
+async def start_child_bot(token: str, owner_user_id: int | None = None, admin_panel_url: str = "", bot_id: str = "") -> bool:
     """Start a child bot by *token*.
 
     *owner_user_id* is the Telegram user ID of the sub-admin who owns this
@@ -60,6 +61,10 @@ async def start_child_bot(token: str, owner_user_id: int | None = None, admin_pa
     provided it overrides the global setting so that the sub-admin's inline
     button and /admin command link to the correct admin panel instance.
 
+    *bot_id* is the string DB id for this child bot (str(child_bots.id)).
+    All data (settings, users, reports, blacklist) for this bot is stored
+    under this partition key.
+
     Returns ``True`` if the bot was started, ``False`` if it was already
     running.  Raises on configuration or network errors.
     """
@@ -67,7 +72,7 @@ async def start_child_bot(token: str, owner_user_id: int | None = None, admin_pa
         logger.debug("Child bot already running (token=…%s)", token[-8:])
         return False
 
-    app = create_bot_application(token, owner_user_id=owner_user_id, admin_panel_url=admin_panel_url)
+    app = create_bot_application(token, owner_user_id=owner_user_id, admin_panel_url=admin_panel_url, bot_id=bot_id)
     task = asyncio.create_task(_poll_child(app))
 
     def _on_done(t: "asyncio.Task[None]") -> None:
@@ -115,8 +120,9 @@ async def start_all_from_db() -> int:
         token = cb["token"]
         owner_user_id = cb.get("owner_user_id")
         admin_panel_url = cb.get("admin_panel_url") or ""
+        bot_id = str(cb["id"])
         try:
-            ok = await start_child_bot(token, owner_user_id=owner_user_id, admin_panel_url=admin_panel_url)
+            ok = await start_child_bot(token, owner_user_id=owner_user_id, admin_panel_url=admin_panel_url, bot_id=bot_id)
             if ok:
                 started += 1
         except Exception:
@@ -142,3 +148,11 @@ def is_running(token: str) -> bool:
 def list_running_tokens() -> list[str]:
     """Return the list of tokens whose child bots are currently polling."""
     return [t for t, (_, task) in _running.items() if not task.done()]
+
+
+def get_bot_by_bot_id(bot_id: str) -> "Bot | None":
+    """Return the Bot object for the given bot_id, or None if not running."""
+    for _token, (app, task) in _running.items():
+        if not task.done() and app.bot_data.get("bot_id") == bot_id:
+            return app.bot
+    return None

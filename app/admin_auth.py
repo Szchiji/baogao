@@ -4,16 +4,17 @@ import time
 # In-memory state for admin panel verification (resets on restart, by design)
 _verify_codes: dict[str, float] = {}    # code -> expiry_timestamp
 _verify_code_otps: dict[str, str] = {}  # code -> otp_token (set after Telegram verification)
-# Each OTP token value is {"expiry": float, "owner_user_id": int | None}.
-# owner_user_id is set when the OTP was generated for a child-bot sub-admin so
+# Each OTP token value is {"expiry": float, "owner_user_id": int | None, "bot_id": str}.
+# owner_user_id and bot_id are set when the OTP was generated for a child-bot sub-admin so
 # the web layer can create a restricted session instead of granting full access.
-_otp_tokens: dict[str, dict] = {}       # token -> {"expiry": float, "owner_user_id": int | None}
+_otp_tokens: dict[str, dict] = {}       # token -> {"expiry": float, "owner_user_id": int | None, "bot_id": str}
 _verify_attempts: dict[int, list[float]] = {}  # user_id -> list of recent attempt timestamps
 
 # Child-admin sessions: sub-admins who logged in via a child-bot OTP receive a
 # short-lived session token instead of the full admin_panel_token cookie.
-_child_admin_sessions: dict[str, int] = {}   # session_token -> owner_user_id
-_child_session_expiry: dict[str, float] = {} # session_token -> expiry_timestamp
+# Session value: {"owner_user_id": int, "bot_id": str}
+_child_admin_sessions: dict[str, dict] = {}   # session_token -> {"owner_user_id": int, "bot_id": str}
+_child_session_expiry: dict[str, float] = {}  # session_token -> expiry_timestamp
 
 _VERIFY_CODE_TTL = 600   # 10 minutes
 _OTP_TOKEN_TTL = 300     # 5 minutes
@@ -52,24 +53,36 @@ def _cleanup_verify_state() -> None:
             _verify_attempts.pop(uid, None)
 
 
-def create_child_admin_session(owner_user_id: int) -> str:
+def create_child_admin_session(owner_user_id: int, bot_id: str = "") -> str:
     """Create a short-lived session token for a child-bot sub-admin.
 
     Returns the session token which should be stored in the browser as an
     ``admin_child_session`` cookie.
     """
     token = secrets.token_urlsafe(24)
-    _child_admin_sessions[token] = owner_user_id
+    _child_admin_sessions[token] = {"owner_user_id": owner_user_id, "bot_id": bot_id}
     _child_session_expiry[token] = time.time() + _CHILD_SESSION_TTL
     return token
 
 
 def get_child_admin_id(session_token: str) -> int | None:
     """Return the owner_user_id for a valid child-admin session, or None."""
+    info = get_child_session_info(session_token)
+    return info["owner_user_id"] if info else None
+
+
+def get_child_session_info(session_token: str) -> dict | None:
+    """Return {"owner_user_id": int, "bot_id": str} for a valid child-admin session, or None."""
     expiry = _child_session_expiry.get(session_token)
     if expiry is None or time.time() > expiry:
         return None
-    return _child_admin_sessions.get(session_token)
+    data = _child_admin_sessions.get(session_token)
+    if data is None:
+        return None
+    # Backward-compat: old sessions stored a raw int (owner_user_id only).
+    if isinstance(data, int):
+        return {"owner_user_id": data, "bot_id": ""}
+    return data
 
 
 def _is_rate_limited(user_id: int) -> bool:
