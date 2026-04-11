@@ -173,7 +173,7 @@ _ADMIN_JS = """
   var overlay=document.querySelector('.sidebar-overlay');
   var hamburger=document.getElementById('hamburger');
   var topbarTitle=document.getElementById('topbar-title');
-  var noSaveTabs=['pending','blacklist','broadcast','reports'];
+  var noSaveTabs=['pending','blacklist','broadcast','reports','child-bots'];
   function switchTab(tab){
     navItems.forEach(function(b){b.classList.remove('active');});
     tabPanes.forEach(function(p){p.classList.remove('active');});
@@ -254,6 +254,7 @@ _ADMIN_JS = """
     {value:'my_reports',label:'我的报告（内置）'},
     {value:'contact',label:'联系管理员（内置）'},
     {value:'usage',label:'操作方式（内置）'},
+    {value:'clone',label:'克隆机器人（内置）'},
     {value:'text',label:'自定义回复文本'}
   ];
   function makeKbRow(item){
@@ -580,6 +581,67 @@ _ADMIN_JS = """
       return confirm('确认向所有用户发送广播？');
     });
   }
+  // ── Child bots management ──────────────────────────────────────────────
+  function loadChildBots(){
+    var container=document.getElementById('child-bots-list');
+    if(!container) return;
+    fetch('/admin/child-bots',{credentials:'include'}).then(function(r){return r.json();}).then(function(data){
+      var bots=data.bots||[];
+      if(!bots.length){container.innerHTML='<p style="color:#6b7280;font-size:.88rem">暂无子机器人。</p>';return;}
+      var html='<table class="table"><thead><tr><th>机器人</th><th>子管理员 ID</th><th>状态</th><th>添加时间</th><th>操作</th></tr></thead><tbody>';
+      bots.forEach(function(b){
+        var name=b.bot_name?(b.bot_name+(b.bot_username?' (@'+b.bot_username+')':'')):(b.bot_username?('@'+b.bot_username):'ID '+b.id);
+        var running=b.running;
+        var active=b.active;
+        var ownerCell=b.owner_user_id?('<code style="font-size:.82rem">'+b.owner_user_id+'</code>'):'<em style="color:#94a3b8;font-size:.8rem">未设置</em>';
+        var statusBadge=running?'<span style="background:#dcfce7;color:#166534;border:1px solid #86efac;padding:2px 8px;border-radius:10px;font-size:.72rem;font-weight:700">✅ 运行中</span>':'<span style="background:#fee2e2;color:#991b1b;border:1px solid #fca5a5;padding:2px 8px;border-radius:10px;font-size:.72rem;font-weight:700">⏹ 已停止</span>';
+        var toggleLabel=active?'停用':'启用';
+        html+='<tr><td>'+name+'</td><td>'+ownerCell+'</td><td>'+statusBadge+'</td><td style="white-space:nowrap;font-size:.82rem">'+((b.created_at||'').substring(0,19))+'</td><td style="white-space:nowrap"><button class="btn btn-secondary btn-sm" onclick="toggleChildBot('+b.id+','+(!active)+')" style="margin-right:4px">'+toggleLabel+'</button><button class="btn btn-danger btn-sm" onclick="removeChildBot('+b.id+')">删除</button></td></tr>';
+      });
+      html+='</tbody></table>';
+      container.innerHTML=html;
+    }).catch(function(){container.innerHTML='<p style="color:#ef4444;font-size:.85rem">加载失败，请刷新页面重试。</p>';});
+  }
+  window.removeChildBot=function(id){
+    if(!confirm('确认删除该子机器人？机器人将立即停止。'))return;
+    fetch('/admin/child-bots/remove',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({id:id})}).then(function(r){return r.json();}).then(function(){loadChildBots();}).catch(function(e){alert('删除失败：'+e);});
+  };
+  window.toggleChildBot=function(id,active){
+    fetch('/admin/child-bots/toggle',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({id:id,active:active})}).then(function(r){return r.json();}).then(function(){loadChildBots();}).catch(function(e){alert('操作失败：'+e);});
+  };
+  (function(){
+    var addBtn=document.getElementById('child-bot-add-btn');
+    var tokenInput=document.getElementById('child-bot-token-input');
+    var ownerInput=document.getElementById('child-bot-owner-input');
+    var msg=document.getElementById('child-bot-add-msg');
+    if(!addBtn) return;
+    addBtn.addEventListener('click',function(){
+      var token=(tokenInput.value||'').trim();
+      var ownerRaw=(ownerInput?ownerInput.value||'':'').trim();
+      if(!token){msg.style.color='#ef4444';msg.textContent='请输入 Bot Token';return;}
+      if(!ownerRaw||!/^\\d+$/.test(ownerRaw)){msg.style.color='#ef4444';msg.textContent='请输入子管理员的 Telegram 数字用户 ID';return;}
+      addBtn.disabled=true;
+      msg.style.color='#6b7280';
+      msg.textContent='验证中，请稍候…';
+      fetch('/admin/child-bots/add',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({token:token,owner_user_id:ownerRaw})}).then(function(r){return r.json().then(function(d){return{ok:r.ok,data:d};});}).then(function(res){
+        addBtn.disabled=false;
+        if(res.ok){
+          msg.style.color='#16a34a';
+          msg.textContent='✅ 已成功添加并启动：'+(res.data.bot_name||'')+(res.data.bot_username?' (@'+res.data.bot_username+')':'');
+          tokenInput.value='';
+          if(ownerInput)ownerInput.value='';
+          loadChildBots();
+        } else {
+          msg.style.color='#ef4444';
+          msg.textContent='❌ '+(res.data.detail||'添加失败');
+        }
+      }).catch(function(e){addBtn.disabled=false;msg.style.color='#ef4444';msg.textContent='网络错误：'+e;});
+    });
+    if(document.querySelector('[data-tab="child-bots"]'))loadChildBots();
+    document.querySelectorAll('.nav-item').forEach(function(btn){
+      if(btn.dataset.tab==='child-bots')btn.addEventListener('click',loadChildBots);
+    });
+  })();
 })();
 """
 
@@ -784,6 +846,8 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
     <button type="button" class="nav-item" data-tab="reports"><span class="nav-icon">📂</span><span class="nav-label">报告历史</span></button>
     <button type="button" class="nav-item" data-tab="blacklist"><span class="nav-icon">🚫</span><span class="nav-label">黑名单</span></button>
     <button type="button" class="nav-item" data-tab="broadcast"><span class="nav-icon">📢</span><span class="nav-label">广播发送</span></button>
+    <button type="button" class="nav-item" data-tab="clone"><span class="nav-icon">🤖</span><span class="nav-label">克隆相关设置</span></button>
+    <button type="button" class="nav-item" data-tab="child-bots"><span class="nav-icon">🤖</span><span class="nav-label">子机器人管理</span></button>
   </nav>
   <div class="sidebar-footer">
     <a href="/admin/logout">🚪 退出登录</a>
@@ -1056,6 +1120,68 @@ def build_admin_html(settings_map: dict[str, str], pending_reports: list[dict] |
             <button type="submit" class="btn btn-primary">📢 发送广播</button>
           </div>
         </form>
+      </div>
+    </div>
+
+    <div id="pane-clone" class="tab-pane">
+      <p class="section-title">克隆相关设置</p>
+      <div class="card">
+        <div style="margin-bottom:20px;padding:14px 16px;background:#eff6ff;border-radius:8px;border:1px solid #bfdbfe;font-size:.85rem;color:#1d4ed8;line-height:1.8">
+          <b>🔧 开启一键克隆功能需完成两步：</b><br>
+          1️⃣ 在本页开启「一键克隆模式」并填入 BotFather 克隆链接<br>
+          2️⃣ 在 @BotFather：打开按钮 → 选择机器人 → Bot Settings → 开启 Bot Management Mode
+        </div>
+        <div class="field">
+          <label>一键克隆模式</label>
+          <label style="display:flex;align-items:center;gap:8px;font-weight:normal;font-size:.88rem;cursor:pointer;text-transform:none;letter-spacing:0;color:#374151">
+            <input type="checkbox" name="clone_mode_enabled" value="1"{'checked' if settings_map.get('clone_mode_enabled','0') == '1' else ''}>
+            开启后，在 /start 欢迎消息及键盘「克隆机器人」按钮中展示克隆入口
+          </label>
+          <div class="hint" style="margin-top:4px">同时需要在 @BotFather 开启 Bot Management Mode，两步都完成功能才会生效。</div>
+        </div>
+        <div class="field">
+          <label>BotFather 克隆链接</label>
+          <input type="text" name="clone_botfather_link" value="{e('clone_botfather_link')}" placeholder="https://t.me/BotFather?start=...">
+          <div class="hint">在 @BotFather 开启 Bot Management Mode 后，BotFather 会提供专属克隆链接，粘贴至此。</div>
+        </div>
+        <div class="field">
+          <label>克隆按钮说明文字</label>
+          <textarea name="clone_text" rows="3">{e('clone_text')}</textarea>
+          <div class="hint">用户点击「克隆机器人」键盘按钮时收到的说明文字（/start 内联按钮无需额外文字）。</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="pane-child-bots" class="tab-pane">
+      <p class="section-title">子机器人管理</p>
+      <div class="card">
+        <div style="margin-bottom:16px;padding:14px 16px;background:#eff6ff;border-radius:8px;border:1px solid #bfdbfe;font-size:.85rem;color:#1d4ed8;line-height:1.8">
+          <b>📖 使用说明</b><br>
+          1️⃣ 用户通过一键克隆在 @BotFather 创建新机器人，获得 Bot Token<br>
+          2️⃣ 将该 Token 及其 Telegram 用户 ID 填入下方，点击「添加」<br>
+          3️⃣ 系统立即启动子机器人，仅该子管理员可使用管理命令<br>
+          子机器人与主机器人共享同一后端，拥有完整功能。
+        </div>
+        <div class="field">
+          <label>Bot Token</label>
+          <input type="text" id="child-bot-token-input" placeholder="粘贴 Bot Token（例如 123456:ABC…）">
+          <div class="hint">Token 来自 @BotFather。</div>
+        </div>
+        <div class="field">
+          <label>子管理员 Telegram 用户 ID</label>
+          <input type="text" id="child-bot-owner-input" placeholder="例如 123456789（必填）" inputmode="numeric">
+          <div class="hint">子机器人的管理员的 Telegram 数字 ID。只有该用户才能使用 /admin、/pending、/approve 等管理命令。可通过 @userinfobot 获取。</div>
+        </div>
+        <div style="margin-top:8px">
+          <button type="button" class="btn btn-success" id="child-bot-add-btn">＋ 添加并启动</button>
+          <div id="child-bot-add-msg" style="margin-top:6px;font-size:.85rem"></div>
+        </div>
+        <div class="field" style="margin-top:20px">
+          <label>已注册的子机器人</label>
+          <div id="child-bots-list" style="margin-top:8px">
+            <div style="color:#6b7280;font-size:.88rem">加载中…</div>
+          </div>
+        </div>
       </div>
     </div>
 

@@ -22,8 +22,29 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
+async def _run_polling_async(main_app: Application) -> None:
+    """Run the main bot (and all active child bots) in polling mode."""
+    from app import bot_manager
+
+    async with main_app:
+        await main_app.updater.start_polling(drop_pending_updates=True)
+        await main_app.start()
+        try:
+            n = await bot_manager.start_all_from_db()
+            if n:
+                logger.info("Started %d child bot(s) in polling mode", n)
+            await asyncio.Event().wait()
+        finally:
+            await bot_manager.stop_all()
+            try:
+                await main_app.updater.stop()
+            except Exception:
+                pass
+            await main_app.stop()
+
+
 def run_polling(bot_app: Application) -> None:
-    bot_app.run_polling(drop_pending_updates=True)
+    asyncio.run(_run_polling_async(bot_app))
 
 
 async def run_webhook(bot_app: Application, config: AppConfig) -> None:

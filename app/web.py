@@ -11,7 +11,7 @@ from typing import Any
 
 from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import Application
 
@@ -26,7 +26,7 @@ from app.admin_auth import (
 from app.admin_panel import build_admin_html, report_to_html
 from app.bot_handlers import _build_approval_feedback, _build_reject_markup, _push_report_to_channel
 from app.config import AppConfig, DEFAULT_SETTINGS
-from app.crud import ban_user, log_audit, setting_get, setting_set, unban_user
+from app.crud import ban_user, log_audit, setting_get, setting_set, unban_user, add_child_bot, remove_child_bot, list_child_bots, set_child_bot_active
 from app.database import db_connection
 from app.utils import parse_json, safe_format, utc_now_iso
 
@@ -112,6 +112,8 @@ a:hover{{background:#4338ca}}
 def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        from app import bot_manager
+
         await application.initialize()
         await application.start()
         if config.mode == "webhook":
@@ -123,9 +125,14 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
                 secret_token=config.webhook_secret or None,
             )
             logger.info("webhook set to %s", webhook_target)
+        # Start all active child bots in polling mode.
+        n = await bot_manager.start_all_from_db()
+        if n:
+            logger.info("Started %d child bot(s)", n)
         try:
             yield
         finally:
+            await bot_manager.stop_all()
             await application.stop()
             await application.shutdown()
 
@@ -327,6 +334,9 @@ input[type=password]:focus{outline:none;border-color:#4f46e5;box-shadow:0 0 0 3p
         usage_text: str = Form(""),
         search_help_text: str = Form(""),
         report_link_base: str = Form(""),
+        clone_mode_enabled: str = Form(""),
+        clone_botfather_link: str = Form(""),
+        clone_text: str = Form(""),
     ):
         if redirect := _auth(request):
             return redirect
@@ -374,6 +384,9 @@ input[type=password]:focus{outline:none;border-color:#4f46e5;box-shadow:0 0 0 3p
             "usage_text": usage_text,
             "search_help_text": search_help_text,
             "report_link_base": report_link_base.strip(),
+            "clone_mode_enabled": "1" if clone_mode_enabled.strip() == "1" else "0",
+            "clone_botfather_link": clone_botfather_link.strip(),
+            "clone_text": clone_text,
         }
         for key, value in updates.items():
             setting_set(key, value)
@@ -711,5 +724,107 @@ p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
             markup,
         )
         return RedirectResponse(url="/admin?tab=broadcast", status_code=303)
+
+    # ── Child bot management ──────────────────────────────────────────────────
+
+    @web.get("/admin/child-bots", response_class=JSONResponse)
+    async def child_bots_list(request: Request):
+        if redirect := _auth(request):
+            return redirect
+        from app import bot_manager
+
+        bots = list_child_bots()
+        result = []
+        for cb in bots:
+            cb_out = dict(cb)
+            cb_out["running"] = bot_manager.is_running(cb["token"])
+            cb_out.pop("token", None)  # never expose the token via the API
+            result.append(cb_out)
+        return JSONResponse({"bots": result})
+
+    @web.post("/admin/child-bots/add")
+    async def child_bot_add(request: Request):
+        if redirect := _auth(request):
+            return redirect
+        from app import bot_manager
+
+        body = await request.json()
+        token = (body.get("token") or "").strip()
+        if not token:
+            raise HTTPException(status_code=400, detail="token is required")
+        # Parse sub-admin (owner) Telegram user ID.
+        owner_user_id: int | None = None
+        raw_owner = body.get("owner_user_id")
+        if raw_owner is not None and str(raw_owner).strip():
+            try:
+                owner_user_id = int(str(raw_owner).strip())
+            except ValueError:
+                raise HTTPException(status_code=400, detail="owner_user_id 必须是数字 Telegram 用户 ID") from None
+        # Validate token by fetching bot info from Telegram.
+        bot_username = ""
+        bot_name = ""
+        try:
+            async with Bot(token=token) as validation_bot:
+                me = await validation_bot.get_me()
+                bot_username = me.username or ""
+                bot_name = me.full_name or ""
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"无效的 Bot Token：{exc}") from exc
+        try:
+            add_child_bot(token, bot_username=bot_username, bot_name=bot_name, owner_user_id=owner_user_id)
+        except Exception as exc:
+            raise HTTPException(status_code=409, detail=f"该 Token 已存在：{exc}") from exc
+        # Start immediately if the event loop is running.
+        try:
+            await bot_manager.start_child_bot(token, owner_user_id=owner_user_id)
+        except Exception:
+            logger.exception("child_bot_add: failed to start child bot @%s", bot_username)
+        logger.info("admin: child bot added @%s (owner=%s)", bot_username, owner_user_id)
+        return JSONResponse({"ok": True, "bot_username": bot_username, "bot_name": bot_name})
+
+    @web.post("/admin/child-bots/remove")
+    async def child_bot_remove(request: Request):
+        if redirect := _auth(request):
+            return redirect
+        from app import bot_manager
+
+        body = await request.json()
+        # Accept either the numeric id or a masked token suffix; we look up by id.
+        bot_id = body.get("id")
+        if bot_id is None:
+            raise HTTPException(status_code=400, detail="id is required")
+        bots = list_child_bots()
+        cb = next((b for b in bots if b["id"] == int(bot_id)), None)
+        if cb is None:
+            raise HTTPException(status_code=404, detail="子机器人不存在")
+        token = cb["token"]
+        await bot_manager.stop_child_bot(token)
+        remove_child_bot(token)
+        logger.info("admin: child bot removed id=%s @%s", bot_id, cb.get("bot_username"))
+        return JSONResponse({"ok": True})
+
+    @web.post("/admin/child-bots/toggle")
+    async def child_bot_toggle(request: Request):
+        if redirect := _auth(request):
+            return redirect
+        from app import bot_manager
+
+        body = await request.json()
+        bot_id = body.get("id")
+        active = bool(body.get("active", True))
+        if bot_id is None:
+            raise HTTPException(status_code=400, detail="id is required")
+        bots = list_child_bots()
+        cb = next((b for b in bots if b["id"] == int(bot_id)), None)
+        if cb is None:
+            raise HTTPException(status_code=404, detail="子机器人不存在")
+        token = cb["token"]
+        owner_user_id = cb.get("owner_user_id")
+        set_child_bot_active(token, active)
+        if active:
+            await bot_manager.start_child_bot(token, owner_user_id=owner_user_id)
+        else:
+            await bot_manager.stop_child_bot(token)
+        return JSONResponse({"ok": True, "active": active})
 
     return web

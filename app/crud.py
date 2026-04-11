@@ -83,6 +83,52 @@ def get_user_reports(user_id: int, offset: int = 0, limit: int = 5) -> list:
     return [dict(r) for r in rows]
 
 
+def list_child_bots() -> list[dict]:
+    """Return all child bots ordered by creation time."""
+    with db_connection() as conn:
+        rows = conn.execute(
+            "SELECT id, token, bot_username, bot_name, owner_user_id, created_at, active FROM child_bots ORDER BY id"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def add_child_bot(token: str, bot_username: str = "", bot_name: str = "", owner_user_id: int | None = None) -> None:
+    """Insert a new child bot record. Raises if the token already exists."""
+    now = utc_now_iso()
+    with db_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO child_bots (token, bot_username, bot_name, owner_user_id, created_at, active)
+            VALUES (%s, %s, %s, %s, %s, 1)
+            """,
+            (token, bot_username or "", bot_name or "", owner_user_id, now),
+        )
+
+
+def remove_child_bot(token: str) -> None:
+    """Delete a child bot record by token."""
+    with db_connection() as conn:
+        conn.execute("DELETE FROM child_bots WHERE token = %s", (token,))
+
+
+def set_child_bot_active(token: str, active: bool) -> None:
+    """Enable or disable a child bot."""
+    with db_connection() as conn:
+        conn.execute(
+            "UPDATE child_bots SET active = %s WHERE token = %s",
+            (1 if active else 0, token),
+        )
+
+
+def update_child_bot_info(token: str, bot_username: str, bot_name: str) -> None:
+    """Update the username/name fields (populated after connecting to Telegram)."""
+    with db_connection() as conn:
+        conn.execute(
+            "UPDATE child_bots SET bot_username = %s, bot_name = %s WHERE token = %s",
+            (bot_username or "", bot_name or "", token),
+        )
+
+
 def is_rate_limited_submission(user_id: int, window_seconds: int = 3600, max_count: int = 3) -> bool:
     """Return True when the user has submitted >= *max_count* reports within the last *window_seconds*."""
     from datetime import datetime, timezone, timedelta

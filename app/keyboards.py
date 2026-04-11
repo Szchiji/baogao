@@ -124,8 +124,10 @@ async def is_subscribed(bot: Bot, user_id: int) -> bool:
     return True
 
 
-def start_keyboard() -> ReplyKeyboardMarkup:
+def start_keyboard(hide_clone: bool = False) -> ReplyKeyboardMarkup:
     items = keyboard_config()
+    if hide_clone:
+        items = [item for item in items if item.get("action") != "clone"]
     if not items:
         return ReplyKeyboardMarkup(
             [[KeyboardButton("写报告")], [KeyboardButton("查阅报告")]], resize_keyboard=True
@@ -186,7 +188,7 @@ def _normalize_admin_url(base_url: str) -> str:
     return f"{base}/admin"
 
 
-def start_inline_buttons(user_id: int | None = None) -> InlineKeyboardMarkup | None:
+def start_inline_buttons(user_id: int | None = None, hide_clone: bool = False) -> InlineKeyboardMarkup | None:
     raw_buttons = parse_json(setting_get("start_buttons_json"), [])
     is_admin = user_id is not None and is_user_admin(user_id)
     admin_panel_url = os.getenv("ADMIN_PANEL_URL", "").strip()
@@ -201,6 +203,13 @@ def start_inline_buttons(user_id: int | None = None) -> InlineKeyboardMarkup | N
                 # All users see the verify page; only admins can complete verification
                 url = _admin_verify_url(admin_panel_url)
             buttons.append([InlineKeyboardButton(text, url=url)])
+    # Append clone button when clone mode is enabled and a BotFather link is configured,
+    # but never for child bots (hide_clone=True).
+    if not hide_clone and setting_get("clone_mode_enabled", "0") == "1":
+        clone_link = setting_get("clone_botfather_link", "").strip()
+        if clone_link:
+            buttons.append([InlineKeyboardButton("🤖 一键克隆机器人", url=clone_link)])
+
     return InlineKeyboardMarkup(buttons) if buttons else None
 
 
