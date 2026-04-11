@@ -113,6 +113,19 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS child_bots (
+              id SERIAL PRIMARY KEY,
+              token TEXT NOT NULL UNIQUE,
+              bot_username TEXT,
+              bot_name TEXT,
+              owner_user_id BIGINT,
+              created_at TEXT NOT NULL,
+              active INTEGER NOT NULL DEFAULT 1
+            )
+            """
+        )
         # Insert default settings only if they don't already exist, so existing
         # configured values are never overwritten on restart/redeploy.
         for key, value in DEFAULT_SETTINGS.items():
