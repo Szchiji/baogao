@@ -92,13 +92,14 @@ def _error_page(message: str, link_text: str = "重新验证", link_href: str = 
 <title>错误</title>
 <style>
 *{{box-sizing:border-box;margin:0;padding:0}}
-body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f9fafb;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px}}
-.card{{background:#fff;border-radius:16px;box-shadow:0 4px 24px rgba(0,0,0,.1);padding:40px 36px;width:100%;max-width:420px;text-align:center}}
-.icon{{font-size:3rem;margin-bottom:16px}}
-h2{{font-size:1.15rem;font-weight:700;color:#111827;margin-bottom:8px}}
-p{{font-size:.88rem;color:#6b7280;line-height:1.6;margin-bottom:24px}}
-a{{display:inline-block;padding:10px 24px;background:#4f46e5;color:#fff;border-radius:8px;text-decoration:none;font-size:.9rem;font-weight:600;transition:background .15s}}
-a:hover{{background:#4338ca}}
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#070912;background-image:radial-gradient(ellipse 80% 50% at 50% 50%,rgba(244,63,94,.04) 0%,transparent 70%);display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px;-webkit-font-smoothing:antialiased}}
+.card{{background:rgba(255,255,255,.04);backdrop-filter:blur(20px) saturate(160%);-webkit-backdrop-filter:blur(20px) saturate(160%);border:1px solid rgba(255,255,255,.1);border-radius:16px;box-shadow:0 8px 32px rgba(0,0,0,.6),inset 0 1px 0 rgba(255,255,255,.06);padding:40px 36px;width:100%;max-width:420px;text-align:center;position:relative;overflow:hidden}}
+.card::before{{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent 0%,rgba(255,255,255,.1) 50%,transparent 100%);pointer-events:none}}
+.icon{{font-size:2.8rem;margin-bottom:16px}}
+h2{{font-size:1.1rem;font-weight:700;color:#dde2ed;margin-bottom:8px}}
+p{{font-size:.85rem;color:#8b95b0;line-height:1.6;margin-bottom:24px}}
+a{{display:inline-block;padding:9px 24px;background:#6366f1;color:#fff;border-radius:7px;text-decoration:none;font-size:.88rem;font-weight:600;transition:all .15s;box-shadow:0 2px 8px rgba(99,102,241,.3)}}
+a:hover{{background:#4f46e5;box-shadow:0 4px 14px rgba(99,102,241,.4);transform:translateY(-1px)}}
 </style>
 </head>
 <body>
@@ -266,23 +267,26 @@ def create_fastapi(application: Application, config: AppConfig) -> FastAPI:
 <title>管理员登录</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f9fafb;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px}
-.card{background:#fff;border-radius:16px;box-shadow:0 4px 24px rgba(0,0,0,.1);padding:40px 36px;width:100%;max-width:420px}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#070912;background-image:radial-gradient(ellipse 80% 50% at 30% 40%,rgba(99,102,241,.06) 0%,transparent 70%);display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px;-webkit-font-smoothing:antialiased}
+.card{background:rgba(255,255,255,.04);backdrop-filter:blur(20px) saturate(160%);-webkit-backdrop-filter:blur(20px) saturate(160%);border:1px solid rgba(255,255,255,.1);border-radius:16px;box-shadow:0 8px 32px rgba(0,0,0,.6),inset 0 1px 0 rgba(255,255,255,.06);padding:40px 36px;width:100%;max-width:420px;position:relative;overflow:hidden}
+.card::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent 0%,rgba(255,255,255,.1) 50%,transparent 100%);pointer-events:none}
 .logo{text-align:center;margin-bottom:28px}
-.logo h1{font-size:1.3rem;font-weight:700;color:#111827;margin-top:10px}
-.logo p{font-size:.85rem;color:#6b7280;margin-top:4px}
-label{display:block;font-size:.78rem;font-weight:600;color:#6b7280;text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px}
-input[type=password]{width:100%;padding:10px 13px;border:1.5px solid #e5e7eb;border-radius:8px;font-size:.9rem;font-family:inherit;transition:border-color .15s,box-shadow .15s}
-input[type=password]:focus{outline:none;border-color:#4f46e5;box-shadow:0 0 0 3px rgba(79,70,229,.12)}
+.logo-icon{font-size:2.2rem;margin-bottom:10px}
+.logo h1{font-size:1.15rem;font-weight:700;color:#dde2ed;letter-spacing:-.01em}
+.logo p{font-size:.83rem;color:#8b95b0;margin-top:5px}
+label{display:block;font-size:.72rem;font-weight:600;color:#8b95b0;text-transform:uppercase;letter-spacing:.055em;margin-bottom:5px}
+input[type=password]{width:100%;padding:9px 13px;border:1px solid rgba(255,255,255,.1);border-radius:7px;font-size:.88rem;font-family:inherit;background:rgba(0,0,0,.28);color:#dde2ed;transition:border-color .15s,box-shadow .15s;-webkit-appearance:none}
+input[type=password]::placeholder{color:#5a6480;opacity:.8}
+input[type=password]:focus{outline:none;border-color:rgba(99,102,241,.5);box-shadow:0 0 0 3px rgba(99,102,241,.11)}
 .field{margin-bottom:20px}
-.btn{display:block;width:100%;padding:11px;background:#4f46e5;color:#fff;border:none;border-radius:8px;font-size:.9rem;font-weight:600;font-family:inherit;cursor:pointer;transition:background .15s;text-align:center}
-.btn:hover{background:#4338ca}
+.btn{display:block;width:100%;padding:10px;background:#6366f1;color:#fff;border:none;border-radius:7px;font-size:.88rem;font-weight:600;font-family:inherit;cursor:pointer;transition:all .15s;text-align:center;box-shadow:0 2px 8px rgba(99,102,241,.3)}
+.btn:hover{background:#4f46e5;box-shadow:0 4px 14px rgba(99,102,241,.4);transform:translateY(-1px)}
 </style>
 </head>
 <body>
 <div class="card">
   <div class="logo">
-    <div style="font-size:2.5rem">📋</div>
+    <div class="logo-icon">📋</div>
     <h1>报告机器人管理后台</h1>
     <p>请输入管理员密码以继续</p>
   </div>
@@ -454,13 +458,15 @@ input[type=password]:focus{outline:none;border-color:#4f46e5;box-shadow:0 0 0 3p
 <title>管理员验证</title>
 <style>
 *{{box-sizing:border-box;margin:0;padding:0}}
-body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f0f2f5;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px}}
-.card{{background:#fff;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,.12);padding:36px 32px;max-width:440px;width:100%;text-align:center}}
-h2{{font-size:1.3rem;color:#1e293b;margin-bottom:8px}}
-p{{color:#64748b;font-size:.9rem;margin-bottom:24px;line-height:1.6}}
-.code-box{{background:#f8fafc;border:2px dashed #93c5fd;border-radius:10px;padding:20px;margin:20px 0;font-size:2rem;font-weight:700;letter-spacing:.3em;color:#2563eb;font-family:monospace}}
-.step{{background:#eff6ff;border-radius:8px;padding:12px 16px;text-align:left;font-size:.85rem;color:#1d4ed8;line-height:1.8;margin-bottom:16px}}
-.waiting{{color:#64748b;font-size:.85rem;margin-top:16px}}
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#070912;background-image:radial-gradient(ellipse 80% 50% at 50% 40%,rgba(99,102,241,.07) 0%,transparent 70%);display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px;-webkit-font-smoothing:antialiased}}
+.card{{background:rgba(255,255,255,.04);backdrop-filter:blur(20px) saturate(160%);-webkit-backdrop-filter:blur(20px) saturate(160%);border:1px solid rgba(255,255,255,.1);border-radius:16px;box-shadow:0 8px 32px rgba(0,0,0,.6),inset 0 1px 0 rgba(255,255,255,.06);padding:36px 32px;max-width:440px;width:100%;text-align:center;position:relative;overflow:hidden}}
+.card::before{{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent 0%,rgba(255,255,255,.1) 50%,transparent 100%);pointer-events:none}}
+h2{{font-size:1.15rem;color:#dde2ed;margin-bottom:8px;font-weight:700}}
+p{{color:#8b95b0;font-size:.85rem;margin-bottom:20px;line-height:1.6}}
+.code-box{{background:rgba(99,102,241,.1);border:1.5px dashed rgba(99,102,241,.4);border-radius:10px;padding:20px;margin:20px 0;font-size:1.9rem;font-weight:700;letter-spacing:.3em;color:#a5b4fc;font-family:monospace}}
+.step{{background:rgba(99,102,241,.08);border:1px solid rgba(99,102,241,.2);border-radius:8px;padding:12px 16px;text-align:left;font-size:.83rem;color:#93c5fd;line-height:1.9;margin-bottom:16px}}
+.step b{{color:#a5b4fc}}
+.waiting{{color:#5a6480;font-size:.83rem;margin-top:16px}}
 </style>
 </head>
 <body>
