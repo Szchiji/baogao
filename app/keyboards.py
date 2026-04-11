@@ -186,10 +186,11 @@ def _normalize_admin_url(base_url: str) -> str:
     return f"{base}/admin"
 
 
-def start_inline_buttons(user_id: int | None = None) -> InlineKeyboardMarkup | None:
+def start_inline_buttons(user_id: int | None = None, admin_panel_url: str | None = None) -> InlineKeyboardMarkup | None:
     raw_buttons = parse_json(setting_get("start_buttons_json"), [])
     is_admin = user_id is not None and is_user_admin(user_id)
-    admin_panel_url = os.getenv("ADMIN_PANEL_URL", "").strip()
+    if admin_panel_url is None:
+        admin_panel_url = os.getenv("ADMIN_PANEL_URL", "").strip()
     buttons: list[list[InlineKeyboardButton]] = []
     for item in raw_buttons:
         if isinstance(item, dict) and item.get("text") and item.get("url"):

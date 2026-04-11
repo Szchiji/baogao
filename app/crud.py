@@ -87,21 +87,27 @@ def list_child_bots() -> list[dict]:
     """Return all child bots ordered by creation time."""
     with db_connection() as conn:
         rows = conn.execute(
-            "SELECT id, token, bot_username, bot_name, owner_user_id, created_at, active FROM child_bots ORDER BY id"
+            "SELECT id, token, bot_username, bot_name, owner_user_id, created_at, active, admin_panel_url FROM child_bots ORDER BY id"
         ).fetchall()
     return [dict(r) for r in rows]
 
 
-def add_child_bot(token: str, bot_username: str = "", bot_name: str = "", owner_user_id: int | None = None) -> None:
+def add_child_bot(
+    token: str,
+    bot_username: str = "",
+    bot_name: str = "",
+    owner_user_id: int | None = None,
+    admin_panel_url: str = "",
+) -> None:
     """Insert a new child bot record. Raises if the token already exists."""
     now = utc_now_iso()
     with db_connection() as conn:
         conn.execute(
             """
-            INSERT INTO child_bots (token, bot_username, bot_name, owner_user_id, created_at, active)
-            VALUES (%s, %s, %s, %s, %s, 1)
+            INSERT INTO child_bots (token, bot_username, bot_name, owner_user_id, created_at, active, admin_panel_url)
+            VALUES (%s, %s, %s, %s, %s, 1, %s)
             """,
-            (token, bot_username or "", bot_name or "", owner_user_id, now),
+            (token, bot_username or "", bot_name or "", owner_user_id, now, admin_panel_url or ""),
         )
 
 

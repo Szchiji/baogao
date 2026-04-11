@@ -49,12 +49,16 @@ async def _poll_child(app: Application) -> None:
                 pass
 
 
-async def start_child_bot(token: str, owner_user_id: int | None = None) -> bool:
+async def start_child_bot(token: str, owner_user_id: int | None = None, admin_panel_url: str = "") -> bool:
     """Start a child bot by *token*.
 
     *owner_user_id* is the Telegram user ID of the sub-admin who owns this
     child bot.  When provided it is stored in ``bot_data["child_admin_id"]``
     so that admin commands are restricted to that user only.
+
+    *admin_panel_url* is the URL of the admin panel for this child bot.  When
+    provided it overrides the global setting so that the sub-admin's inline
+    button and /admin command link to the correct admin panel instance.
 
     Returns ``True`` if the bot was started, ``False`` if it was already
     running.  Raises on configuration or network errors.
@@ -63,7 +67,7 @@ async def start_child_bot(token: str, owner_user_id: int | None = None) -> bool:
         logger.debug("Child bot already running (token=…%s)", token[-8:])
         return False
 
-    app = create_bot_application(token, owner_user_id=owner_user_id)
+    app = create_bot_application(token, owner_user_id=owner_user_id, admin_panel_url=admin_panel_url)
     task = asyncio.create_task(_poll_child(app))
 
     def _on_done(t: "asyncio.Task[None]") -> None:
@@ -110,8 +114,9 @@ async def start_all_from_db() -> int:
             continue
         token = cb["token"]
         owner_user_id = cb.get("owner_user_id")
+        admin_panel_url = cb.get("admin_panel_url") or ""
         try:
-            ok = await start_child_bot(token, owner_user_id=owner_user_id)
+            ok = await start_child_bot(token, owner_user_id=owner_user_id, admin_panel_url=admin_panel_url)
             if ok:
                 started += 1
         except Exception:
