@@ -22,6 +22,21 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
+def _start_invite_cleanup(app: Application) -> None:
+    """Schedule the invite-module background cleanup task if Redis is available."""
+    try:
+        from app.invite.cleanup import cleanup_expired_data
+        from app.invite.redis_client import redis_client as _redis
+
+        if _redis is not None:
+            asyncio.get_event_loop().create_task(cleanup_expired_data(app))
+            logger.info("Invite module: background cleanup task started")
+        else:
+            logger.info("Invite module: Redis unavailable — cleanup task skipped")
+    except Exception as exc:  # pragma: no cover
+        logger.warning("Invite module: failed to start cleanup task: %s", exc)
+
+
 async def _run_polling_async(main_app: Application) -> None:
     """Run the main bot (and all active child bots) in polling mode."""
     from app import bot_manager
@@ -33,6 +48,7 @@ async def _run_polling_async(main_app: Application) -> None:
             n = await bot_manager.start_all_from_db()
             if n:
                 logger.info("Started %d child bot(s) in polling mode", n)
+            _start_invite_cleanup(main_app)
             await asyncio.Event().wait()
         finally:
             await bot_manager.stop_all()
@@ -51,7 +67,15 @@ async def run_webhook(bot_app: Application, config: AppConfig) -> None:
     api = create_fastapi(bot_app, config)
     uv_config = uvicorn.Config(api, host=config.host, port=config.port, log_level="info")
     server = uvicorn.Server(uv_config)
+    # The server runs in the current event loop; start the cleanup task first.
+    asyncio.get_event_loop().create_task(_deferred_cleanup(bot_app))
     await server.serve()
+
+
+async def _deferred_cleanup(app: Application) -> None:
+    """Wait briefly for the event loop to be ready, then launch invite cleanup."""
+    await asyncio.sleep(1)
+    _start_invite_cleanup(app)
 
 
 def main() -> None:
@@ -61,6 +85,18 @@ def main() -> None:
     config = load_config()
     logger.info("Config loaded (mode=%s). Applying settings…", config.mode)
     setting_set("admin_panel_url", config.admin_panel_url)
+
+    # Initialise invite-module Redis data on startup
+    try:
+        from app.config import get_admin_user_ids
+        from app.invite.redis_client import init_admin_from_env, migrate_global_groups, redis_client as _redis
+
+        if _redis is not None:
+            init_admin_from_env(get_admin_user_ids())
+            migrate_global_groups()
+    except Exception as exc:
+        logger.warning("Invite module init skipped: %s", exc)
+
     app = create_bot_application(config.token)
     app.bot_data["admin_panel_url"] = config.admin_panel_url
     app.bot_data["admin_panel_token"] = config.admin_panel_token
