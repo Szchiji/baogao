@@ -48,13 +48,13 @@ from app.crud import (
 from app.database import db_connection
 from app.keyboards import (
     _make_field_prompt,
-    _report_submit_keyboard,
     build_channel_link,
     get_force_sub_channels,
     get_push_channels,
     is_subscribed,
     keyboard_config,
     render_report_preview,
+    report_fill_keyboard,
     report_template,
     start_inline_buttons,
     start_keyboard,
@@ -516,7 +516,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         sent_preview = await update.message.reply_text(
             render_report_preview(draft["values"], draft["template"]),
             parse_mode=ParseMode.HTML,
-            reply_markup=_report_submit_keyboard(),
+            reply_markup=report_fill_keyboard(draft["values"], draft["template"]),
         )
         schedule_auto_delete(context.bot, sent_preview.chat_id, sent_preview.message_id)
         return
@@ -1089,7 +1089,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             sent_preview = await query.message.reply_text(
                 render_report_preview(draft["values"], draft["template"]),
                 parse_mode=ParseMode.HTML,
-                reply_markup=_report_submit_keyboard(),
+                reply_markup=report_fill_keyboard(draft["values"], draft["template"]),
             )
             schedule_auto_delete(context.bot, sent_preview.chat_id, sent_preview.message_id)
         return
@@ -1234,7 +1234,7 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     sent_preview = await update.message.reply_text(
         render_report_preview(draft["values"], draft["template"]),
         parse_mode=ParseMode.HTML,
-        reply_markup=_report_submit_keyboard(),
+        reply_markup=report_fill_keyboard(draft["values"], draft["template"]),
     )
     schedule_auto_delete(context.bot, sent_preview.chat_id, sent_preview.message_id)
 
