@@ -54,10 +54,6 @@ def db_connection():
 
 def init_db() -> None:
     with db_connection() as conn:
-        # Drop all tables to start fresh
-        for table in ("audit_log", "blacklist", "users", "reports", "settings", "child_bots"):
-            conn.execute(f"DROP TABLE IF EXISTS {table} CASCADE")
-
         # --- settings ---
         # New schema uses a composite PK (bot_id, key) for per-bot isolation.
         # bot_id = '' for the main bot; str(child_bot.id) for each child bot.

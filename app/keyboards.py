@@ -232,7 +232,10 @@ def report_fill_keyboard(values: dict[str, str], template: dict[str, Any]) -> In
         if not field.get("required", True):
             label += "（可选）"
         buttons.append([InlineKeyboardButton(f"{done}填写 {label}", callback_data=f"fill:{key}")])
-    buttons.append([InlineKeyboardButton("提交审核", callback_data="submit_report")])
+    buttons.append([
+        InlineKeyboardButton("✅ 提交审核", callback_data="submit_report"),
+        InlineKeyboardButton("❌ 取消", callback_data="cancel_report"),
+    ])
     return InlineKeyboardMarkup(buttons)
 
 
