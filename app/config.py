@@ -61,6 +61,25 @@ class AppConfig:
     admin_panel_url: str
 
 
+@dataclass
+class InviteConfig:
+    """Configuration for the invite link management module."""
+
+    redis_url: str
+    invite_expire_minutes: int
+    invite_cooldown_hours: int
+    welcome_text: str
+
+
+def load_invite_config() -> InviteConfig:
+    return InviteConfig(
+        redis_url=os.getenv("REDIS_URL", "redis://localhost:6379/0"),
+        invite_expire_minutes=int(os.getenv("INVITE_EXPIRE_MINUTES", "5")),
+        invite_cooldown_hours=int(os.getenv("INVITE_COOLDOWN_HOURS", "24")),
+        welcome_text=os.getenv("WELCOME_TEXT", "👋 欢迎！请选择要加入的群组："),
+    )
+
+
 def load_config() -> AppConfig:
     token = os.getenv("BOT_TOKEN", "").strip()
     if not token:

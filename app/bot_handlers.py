@@ -197,6 +197,14 @@ async def send_start_content(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Route invite-module start parameters before the normal baogao logic.
+    message_text = (update.message.text or "") if update.message else ""
+    start_param = message_text.split(" ", 1)[1].strip() if " " in message_text else ""
+    if start_param.startswith("join_") or start_param.startswith("joinall_"):
+        from app.invite.handlers import handle_invite_start
+        await handle_invite_start(update, context, start_param)
+        return
+
     user_id = update.effective_user.id
     bot_id = _get_bot_id(context)
     upsert_user(user_id, update.effective_user.username, bot_id=bot_id)
@@ -1374,6 +1382,10 @@ def create_bot_application(
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, on_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+
+    # Register invite link management handlers (uses group=-1 for higher priority)
+    from app.invite.handlers import register_invite_handlers
+    register_invite_handlers(app)
 
     if app.job_queue is not None:
         # Read the reminder check interval from DB (or env) at startup; default 2 h
