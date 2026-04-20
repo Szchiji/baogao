@@ -29,7 +29,7 @@ def _start_invite_cleanup(app: Application) -> None:
         from app.invite.redis_client import redis_client as _redis
 
         if _redis is not None:
-            asyncio.get_event_loop().create_task(cleanup_expired_data(app))
+            asyncio.create_task(cleanup_expired_data(app))
             logger.info("Invite module: background cleanup task started")
         else:
             logger.info("Invite module: Redis unavailable — cleanup task skipped")
@@ -68,7 +68,7 @@ async def run_webhook(bot_app: Application, config: AppConfig) -> None:
     uv_config = uvicorn.Config(api, host=config.host, port=config.port, log_level="info")
     server = uvicorn.Server(uv_config)
     # The server runs in the current event loop; start the cleanup task first.
-    asyncio.get_event_loop().create_task(_deferred_cleanup(bot_app))
+    asyncio.create_task(_deferred_cleanup(bot_app))
     await server.serve()
 
 

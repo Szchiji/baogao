@@ -344,7 +344,8 @@ async def select_group_callback(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     await query.answer()
 
-    # format: inv_select_{group_id}_{user_id}_{admin_id}
+    # callback_data format: inv_select_{group_id}_{user_id}_{admin_id}
+    # split("_") → ["inv", "select", group_id, user_id, admin_id] (5 parts)
     parts = query.data.split("_")
     if len(parts) < 5:
         await query.edit_message_text("链接已失效，请重新获取")
@@ -429,7 +430,8 @@ async def join_all_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     query = update.callback_query
     await query.answer()
 
-    # format: inv_joinall_{user_id}_{admin_id}
+    # callback_data format: inv_joinall_{user_id}_{admin_id}
+    # split("_") → ["inv", "joinall", user_id, admin_id] (4 parts)
     parts = query.data.split("_")
     if len(parts) < 4:
         await query.edit_message_text("链接已失效，请重新获取")
@@ -512,7 +514,8 @@ async def approve_request_callback(update: Update, context: ContextTypes.DEFAULT
     query = update.callback_query
     await query.answer()
 
-    # format: inv_approve_{user_id}_{group_id}
+    # callback_data format: inv_approve_{user_id}_{group_id}
+    # split("_", 3) → ["inv", "approve", user_id, group_id] (4 parts; maxsplit preserves group_id)
     parts = query.data.split("_", 3)
     if len(parts) < 4:
         await query.edit_message_text("数据格式错误")
@@ -562,7 +565,8 @@ async def reject_request_callback(update: Update, context: ContextTypes.DEFAULT_
     query = update.callback_query
     await query.answer()
 
-    # format: inv_reject_{user_id}_{group_id}
+    # callback_data format: inv_reject_{user_id}_{group_id}
+    # split("_", 3) → ["inv", "reject", user_id, group_id] (4 parts; maxsplit preserves group_id)
     parts = query.data.split("_", 3)
     if len(parts) < 4:
         await query.edit_message_text("数据格式错误")
